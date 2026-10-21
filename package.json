@@ -1,9 +1,12 @@
 {
-  "name": "redis-clone-console",
+  "name": "discache-distributed-systems-lab",
+  "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "description": "DisCache — Interactive Distributed Systems Lab & Binary TCP Adapter",
   "scripts": {
-    "start": "node bridge.js"
+    "start": "node bridge.js",
+    "benchmark": "python load_tester.py --workers 50 --requests 2500"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -1,0 +1,98 @@
+{
+  "source": "measured_python_load_tester",
+  "timestamp": "2026-10-21T11:37:49Z",
+  "target_mode": "coordinator",
+  "endpoint": "127.0.0.1:8000",
+  "config": {
+    "total_requests": 2500,
+    "workers": 50,
+    "get_pct": 70.0,
+    "put_pct": 20.0,
+    "delete_pct": 10.0,
+    "keyspace_size": 500
+  },
+  "metrics": {
+    "total_requests": 2500,
+    "successful_ops": 2500,
+    "failed_ops": 0,
+    "elapsed_sec": 0.3853,
+    "throughput_ops_sec": 6489.2,
+    "avg_latency_ms": 6.273,
+    "p50_latency_ms": 5.02,
+    "p90_latency_ms": 10.756,
+    "p95_latency_ms": 14.346,
+    "p99_latency_ms": 30.689
+  },
+  "operation_counts": {
+    "GET": 1713,
+    "PUT": 518,
+    "DELETE": 269
+  },
+  "node_distribution": {
+    "node_1": 788,
+    "node_2": 801,
+    "node_3": 911
+  },
+  "series": [
+    {
+      "bucket": 1,
+      "ops_per_sec": 6312.0,
+      "p50_ms": 3.052,
+      "p99_ms": 7.924
+    },
+    {
+      "bucket": 2,
+      "ops_per_sec": 3142.8,
+      "p50_ms": 4.984,
+      "p99_ms": 28.201
+    },
+    {
+      "bucket": 3,
+      "ops_per_sec": 3116.4,
+      "p50_ms": 15.92,
+      "p99_ms": 55.47
+    },
+    {
+      "bucket": 4,
+      "ops_per_sec": 6496.9,
+      "p50_ms": 7.591,
+      "p99_ms": 22.282
+    },
+    {
+      "bucket": 5,
+      "ops_per_sec": 8821.0,
+      "p50_ms": 5.289,
+      "p99_ms": 13.187
+    },
+    {
+      "bucket": 6,
+      "ops_per_sec": 8583.3,
+      "p50_ms": 5.55,
+      "p99_ms": 12.666
+    },
+    {
+      "bucket": 7,
+      "ops_per_sec": 8662.5,
+      "p50_ms": 5.431,
+      "p99_ms": 13.696
+    },
+    {
+      "bucket": 8,
+      "ops_per_sec": 8451.3,
+      "p50_ms": 5.447,
+      "p99_ms": 13.511
+    },
+    {
+      "bucket": 9,
+      "ops_per_sec": 8292.8,
+      "p50_ms": 4.339,
+      "p99_ms": 11.473
+    },
+    {
+      "bucket": 10,
+      "ops_per_sec": 4146.4,
+      "p50_ms": 2.514,
+      "p99_ms": 7.746
+    }
+  ]
+}

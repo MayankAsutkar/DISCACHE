@@ -1,19 +1,1310 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Redis Clone / Console</title><link rel="stylesheet" href="/styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DisCache — Distributed Systems Lab</title>
+  <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <header class="topbar"><div class="brand"><span class="mark">R</span><span>REDIS CLONE</span><small>COMMAND CONSOLE</small></div><div class="status"><i id="statusDot"></i><span id="statusText">CONNECTING</span><span class="divider"></span><span>TCP 127.0.0.1:6379</span></div></header>
-  <main class="shell">
-    <section class="hero"><div><p class="eyebrow">REAL-TIME OPERATIONS</p><h1>Inspect the wire.</h1><p class="subhead">A live control surface for your C++ Redis-compatible server.</p></div><button id="wireButton" class="button secondary">RAW WIRE <span>↗</span></button></section>
-    <div class="grid">
-      <section class="panel terminal-panel"><div class="panel-head"><div><span class="eyebrow">01 / REPL</span><h2>Command runner</h2></div><span class="chip" id="latency">-- ms</span></div><div id="terminal" class="terminal" aria-live="polite"></div><form id="commandForm" class="command-line"><span>redis&gt;</span><input id="commandInput" autocomplete="off" spellcheck="false" placeholder="try SET hello world"><button class="button run" type="submit">RUN <span>↵</span></button></form><div class="hint">↑ ↓ history <span>·</span> RESP over TCP</div></section>
-      <section class="panel inspector-panel"><div class="panel-head"><div><span class="eyebrow">02 / DATABASE</span><h2>Key inspector</h2></div><div class="actions"><label class="toggle"><input id="pollToggle" type="checkbox"><span></span> LIVE</label><button id="refreshButton" class="icon-button" title="Refresh keys">↻</button></div></div><div class="table-wrap"><table><thead><tr><th>KEY</th><th>TYPE</th><th>TTL</th><th>STATE</th></tr></thead><tbody id="keyRows"><tr><td colspan="4" class="empty">Run KEYS * to inspect the database.</td></tr></tbody></table></div><div class="table-foot"><span id="keyCount">0 keys</span><span id="lastRefresh">NOT YET SCANNED</span></div></section>
-      <section class="panel stress-panel"><div class="panel-head"><div><span class="eyebrow">03 / LOAD TEST</span><h2>Throughput probe</h2></div><button id="stressButton" class="button accent">RUN 500 OPS <span>→</span></button></div><div class="metric-grid"><div class="metric"><small>OPS / SEC</small><strong id="ops">--</strong></div><div class="metric"><small>AVG LATENCY</small><strong id="avg">--</strong></div><div class="metric"><small>P99 LATENCY</small><strong id="p99">--</strong></div><div class="metric"><small>SUCCESS / FAIL</small><strong><b id="success">0</b> / <em id="failed">0</em></strong></div></div><div class="progress"><span id="progressBar"></span></div><p id="stressState" class="muted">Sequential commands on one persistent bridge connection.</p></section>
+  <!-- 3. GLOBAL NAVIGATION -->
+  <header class="topbar" role="banner">
+    <div class="topbar-inner">
+      <div class="brand-group">
+        <a href="#overview" class="wordmark">DisCache</a>
+        <span class="brand-divider">|</span>
+        <span class="brand-subtitle">Distributed Systems Lab</span>
+      </div>
+
+      <nav class="main-nav" aria-label="Laboratory Sections">
+        <a href="#overview" class="nav-link active" data-section="overview">Overview</a>
+        <a href="#architecture" class="nav-link" data-section="architecture">Architecture</a>
+        <a href="#hashing" class="nav-link" data-section="hashing">Consistent Hashing</a>
+        <a href="#cache-engine" class="nav-link" data-section="cache-engine">Cache Engine</a>
+        <a href="#wal-recovery" class="nav-link" data-section="wal-recovery">WAL Recovery</a>
+        <a href="#performance" class="nav-link" data-section="performance">Performance</a>
+      </nav>
+
+      <div class="topbar-controls">
+        <button id="modeToggleBtn" class="mode-badge" type="button" title="Toggle between self-contained deterministic Demo Mode and Live C++ TCP Cluster Mode">
+          <span id="modeBadgeText">DEMO MODE: SIMULATED DATA</span>
+        </button>
+        <button id="motionToggleBtn" class="motion-btn" type="button" title="Toggle reduced motion for packet animations">
+          <span id="motionBtnText">MOTION: STANDARD</span>
+        </button>
+      </div>
     </div>
+  </header>
+
+  <main class="lab-canvas">
+    <!-- 4. OVERVIEW SECTION -->
+    <section id="overview" class="lab-section">
+      <div class="section-header-grid">
+        <div class="col-span-8">
+          <div class="eyebrow">BTECH CSE SYSTEMS ENGINEERING LABORATORY · C++20 IMPLEMENTATION</div>
+          <h1 class="hero-title">DisCache: Inside a Distributed Cache</h1>
+          <p class="hero-subtitle">
+            Explore how keys are routed, cached, evicted, persisted, and benchmarked across independent data nodes.
+          </p>
+        </div>
+        <div class="col-span-4 hero-actions-box">
+          <div class="objective-panel">
+            <div class="panel-label">PROJECT OBJECTIVE</div>
+            <p class="objective-text">
+              Build and evaluate a distributed caching system from first principles without Redis, Memcached, frameworks, or external caching libraries.
+            </p>
+            <div class="hero-btn-row">
+              <a href="#architecture" id="btnExploreFlow" class="btn btn-primary">Explore Request Flow →</a>
+              <a href="#hashing" id="btnOpenRing" class="btn btn-secondary">Open Hash Ring →</a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Three Primary Architecture Facts -->
+      <div class="facts-grid">
+        <div class="fact-card">
+          <div class="fact-meta">ROUTING TIER · PORT 8000</div>
+          <div class="fact-value">1 Coordinator</div>
+          <p class="fact-desc">
+            Stateless C++20 TCP process on <code>127.0.0.1:8000</code>. Computes <code>MurmurHash3_x86_32</code> and performs <code>std::map::lower_bound</code> clockwise successor lookup to forward binary frames over raw TCP.
+          </p>
+        </div>
+        <div class="fact-card">
+          <div class="fact-meta">STORAGE TIER · PORTS 8001–8003</div>
+          <div class="fact-value">3 Independent Data Nodes</div>
+          <p class="fact-desc">
+            Three isolated OS processes listening on ports <code>8001</code>, <code>8002</code>, and <code>8003</code>. Each node manages its own in-memory LRU cache, bounded worker pool, and local disk Write-Ahead Log. No cross-node replication.
+          </p>
+        </div>
+        <div class="fact-card">
+          <div class="fact-meta">RING GRANULARITY · 300 TOTAL POSITIONS</div>
+          <div class="fact-value">100 Virtual Nodes per Data Node</div>
+          <p class="fact-desc">
+            Each physical Data Node is mapped to 100 virtual positions on the 32-bit unsigned hash ring <code>[0, 2^32 - 1]</code>, interleaving node ownership for finer-grained keyspace partitioning.
+          </p>
+        </div>
+      </div>
+
+      <!-- Compact Architecture Preview -->
+      <div class="panel overview-preview-panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-index">FIG 1.0</span>
+            <strong class="panel-title">System Topology &amp; Process Boundary Preview</strong>
+          </div>
+          <span class="panel-annotation">4 Independent C++20 Processes on localhost · Custom Binary Protocol (0xDC) over Raw TCP</span>
+        </div>
+        <div class="topology-preview">
+          <div class="topo-stage">
+            <div class="topo-node">
+              <div class="topo-tag">CLIENT HARNESS</div>
+              <div class="topo-name">Python Load Tester</div>
+              <div class="topo-detail">50+ Worker Threads</div>
+              <div class="topo-detail">Raw TCP Binary Frames</div>
+            </div>
+          </div>
+          <div class="topo-arrow" aria-hidden="true">
+            <span class="topo-arrow-label">TCP :8000</span>
+            <span class="topo-arrow-line">──────►</span>
+          </div>
+          <div class="topo-stage">
+            <div class="topo-node">
+              <div class="topo-tag">PROCESS 1</div>
+              <div class="topo-name">Coordinator :8000</div>
+              <div class="topo-detail">select() Multiplexer</div>
+              <div class="topo-detail">Bounded Thread Pool</div>
+            </div>
+          </div>
+          <div class="topo-arrow" aria-hidden="true">
+            <span class="topo-arrow-label">MurmurHash3</span>
+            <span class="topo-arrow-line">──────►</span>
+          </div>
+          <div class="topo-stage">
+            <div class="topo-node">
+              <div class="topo-tag">ROUTING TABLE</div>
+              <div class="topo-name">Consistent Hash Ring</div>
+              <div class="topo-detail">std::map&lt;uint32_t, VNode&gt;</div>
+              <div class="topo-detail">3 × 100 = 300 Virtual Nodes</div>
+            </div>
+          </div>
+          <div class="topo-arrow" aria-hidden="true">
+            <span class="topo-arrow-label">Forward TCP</span>
+            <span class="topo-arrow-line">──────►</span>
+          </div>
+          <div class="topo-stage topo-nodes-cluster">
+            <div class="topo-node topo-subnode">
+              <div class="topo-name">Data Node 1 <code>:8001</code></div>
+              <div class="topo-subcomponents">
+                <span class="sub-pill">LRU Cache</span>
+                <span class="sub-pill">Per-node WAL (<code>node_1.log</code>)</span>
+              </div>
+            </div>
+            <div class="topo-node topo-subnode">
+              <div class="topo-name">Data Node 2 <code>:8002</code></div>
+              <div class="topo-subcomponents">
+                <span class="sub-pill">LRU Cache</span>
+                <span class="sub-pill">Per-node WAL (<code>node_2.log</code>)</span>
+              </div>
+            </div>
+            <div class="topo-node topo-subnode">
+              <div class="topo-name">Data Node 3 <code>:8003</code></div>
+              <div class="topo-subcomponents">
+                <span class="sub-pill">LRU Cache</span>
+                <span class="sub-pill">Per-node WAL (<code>node_3.log</code>)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. MAIN INTERACTIVE ARCHITECTURE VISUALIZATION -->
+    <section id="architecture" class="lab-section">
+      <div class="section-title-bar">
+        <div>
+          <div class="eyebrow">SECTION 01 · END-TO-END REQUEST PIPELINE</div>
+          <h2 class="section-heading">Interactive Distributed Architecture Workspace</h2>
+        </div>
+        <div class="section-meta-note">
+          Step-by-step packet traversal across Coordinator, Consistent Hash Ring, Data Nodes, LRU Cache, and Write-Ahead Log.
+        </div>
+      </div>
+
+      <!-- Control Bar -->
+      <div class="panel control-deck">
+        <div class="control-row">
+          <div class="control-group">
+            <label class="control-label" for="archOpSelect">OPERATION</label>
+            <div class="segmented-group" id="archOpGroup" role="radiogroup" aria-label="Cache Operation">
+              <button type="button" class="seg-btn active" data-op="PUT">PUT</button>
+              <button type="button" class="seg-btn" data-op="GET">GET</button>
+              <button type="button" class="seg-btn" data-op="DELETE">DELETE</button>
+            </div>
+          </div>
+
+          <div class="control-group control-key">
+            <label class="control-label" for="archKeyInput">KEY INPUT</label>
+            <input type="text" id="archKeyInput" class="lab-input mono" value="session:4092" placeholder="e.g. session:4092" autocomplete="off" spellcheck="false" />
+          </div>
+
+          <div class="control-group control-val" id="archValGroup">
+            <label class="control-label" for="archValInput">VALUE INPUT <span id="archValHint">(PUT ONLY)</span></label>
+            <input type="text" id="archValInput" class="lab-input mono" value="uid=8810;role=admin" placeholder="Value payload" autocomplete="off" spellcheck="false" />
+          </div>
+
+          <div class="control-group control-presets">
+            <label class="control-label">SAMPLE KEYS (3 NODES)</label>
+            <div class="preset-btns">
+              <button type="button" class="btn btn-xs sample-key-btn" data-key="user:101" data-val="Alice">user:101</button>
+              <button type="button" class="btn btn-xs sample-key-btn" data-key="session:4092" data-val="uid=8810">session:4092</button>
+              <button type="button" class="btn btn-xs sample-key-btn" data-key="invoice:9004" data-val="paid=true">invoice:9004</button>
+            </div>
+          </div>
+
+          <div class="control-group control-actions">
+            <label class="control-label">EXECUTION CONTROLS</label>
+            <div class="action-btns">
+              <button type="button" id="archRunBtn" class="btn btn-primary">Run</button>
+              <button type="button" id="archStepBtn" class="btn btn-secondary">Step Forward</button>
+              <button type="button" id="archResetBtn" class="btn btn-secondary">Reset</button>
+            </div>
+          </div>
+        </div>
+        <div id="archValidationMsg" class="validation-banner" hidden></div>
+      </div>
+
+      <!-- Central Architecture Diagram Canvas -->
+      <div class="panel arch-workspace-panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-index">FIG 1.1</span>
+            <strong class="panel-title">Left-to-Right Distributed Request &amp; Mutation Flow</strong>
+          </div>
+          <div class="stage-progress-indicator">
+            <span>STAGE: <strong id="archStageCounter">0 / 6</strong></span>
+            <span class="divider-dot">·</span>
+            <span id="archStageStatusText">IDLE — READY FOR REQUEST</span>
+          </div>
+        </div>
+
+        <!-- Horizontal Pipeline Stages -->
+        <div class="pipeline-track" id="archPipelineTrack">
+          <!-- Stage 1 -->
+          <div class="pipe-box" id="pipeStage1" data-stage="1">
+            <div class="pipe-step-num">STAGE 01</div>
+            <div class="pipe-title">Python Load Tester</div>
+            <div class="pipe-sub">Client Socket</div>
+            <div class="pipe-code" id="pipeClientInfo">Op: PUT session:4092</div>
+          </div>
+
+          <div class="pipe-connector" id="pipeConn1">
+            <span class="conn-label">Binary Req (0xDC)</span>
+            <div class="conn-line"><span class="packet-marker" id="pktMarker1"></span></div>
+            <span class="conn-sub">TCP :8000</span>
+          </div>
+
+          <!-- Stage 2 -->
+          <div class="pipe-box" id="pipeStage2" data-stage="2">
+            <div class="pipe-step-num">STAGE 02</div>
+            <div class="pipe-title">Coordinator :8000</div>
+            <div class="pipe-sub">select() + Worker Pool</div>
+            <div class="pipe-code" id="pipeCoordInfo">Hash: --</div>
+          </div>
+
+          <div class="pipe-connector" id="pipeConn2">
+            <span class="conn-label">std::map::lower_bound</span>
+            <div class="conn-line"><span class="packet-marker" id="pktMarker2"></span></div>
+            <span class="conn-sub">300 VNodes</span>
+          </div>
+
+          <!-- Stage 3 -->
+          <div class="pipe-box" id="pipeStage3" data-stage="3">
+            <div class="pipe-step-num">STAGE 03</div>
+            <div class="pipe-title">Consistent Hash Ring</div>
+            <div class="pipe-sub">Successor VNode Lookup</div>
+            <div class="pipe-code" id="pipeRingInfo">VNode: --</div>
+          </div>
+
+          <div class="pipe-connector" id="pipeConn3">
+            <span class="conn-label" id="pipeRoutePortLabel">Forward TCP</span>
+            <div class="conn-line"><span class="packet-marker" id="pktMarker3"></span></div>
+            <span class="conn-sub" id="pipeRouteNodeSub">Target Node</span>
+          </div>
+
+          <!-- Stage 4 -->
+          <div class="pipe-box" id="pipeStage4" data-stage="4">
+            <div class="pipe-step-num">STAGE 04</div>
+            <div class="pipe-title" id="pipeSelectedNodeTitle">Selected Data Node</div>
+            <div class="pipe-sub" id="pipeSelectedNodePort">Port :8001 / :8002 / :8003</div>
+            <div class="pipe-code" id="pipeNodeInfo">Awaiting routing</div>
+          </div>
+
+          <div class="pipe-connector" id="pipeConn4">
+            <span class="conn-label" id="pipeCacheOrderLabel">O(1) Lookup / Update</span>
+            <div class="conn-line"><span class="packet-marker" id="pktMarker4"></span></div>
+            <span class="conn-sub">std::shared_mutex</span>
+          </div>
+
+          <!-- Stage 5 -->
+          <div class="pipe-box" id="pipeStage5" data-stage="5">
+            <div class="pipe-step-num">STAGE 05</div>
+            <div class="pipe-title">LRU Cache</div>
+            <div class="pipe-sub">HashMap + Doubly Linked List</div>
+            <div class="pipe-code" id="pipeLRUInfo">MRU Head: --</div>
+          </div>
+
+          <div class="pipe-connector" id="pipeConn5">
+            <span class="conn-label" id="pipeWalOrderLabel">Mutations Only</span>
+            <div class="conn-line"><span class="packet-marker" id="pktMarker5"></span></div>
+            <span class="conn-sub">Append + Flush</span>
+          </div>
+
+          <!-- Stage 6 -->
+          <div class="pipe-box" id="pipeStage6" data-stage="6">
+            <div class="pipe-step-num">STAGE 06</div>
+            <div class="pipe-title">Per-Node WAL</div>
+            <div class="pipe-sub" id="pipeWalFileSub">node_X.log (Durable)</div>
+            <div class="pipe-code" id="pipeWALInfo">Write-Ahead Log</div>
+          </div>
+        </div>
+
+        <!-- Coordinator Routing Branch to the 3 Independent Data Node Processes -->
+        <div class="routing-cluster-zone">
+          <div class="routing-svg-column">
+            <div class="routing-origin-box">
+              <strong>Coordinator :8000</strong>
+              <span>Routing Branch</span>
+            </div>
+            <svg id="archRoutingSvg" class="routing-branch-svg" viewBox="0 0 260 270" aria-label="Coordinator to Data Nodes Routing Branch">
+              <defs>
+                <marker id="arrowThin" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 1 L 9 5 L 0 9 z" fill="#000000" />
+                </marker>
+                <marker id="arrowThick" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#000000" />
+                </marker>
+              </defs>
+              <!-- Route to Node 1 (:8001) -->
+              <path id="branchLine1" d="M 10 135 L 95 135 L 135 45 L 248 45" fill="none" stroke="#000000" stroke-width="1" marker-end="url(#arrowThin)" />
+              <text x="142" y="36" class="svg-branch-label">TCP :8001 (Node 1)</text>
+
+              <!-- Route to Node 2 (:8002) -->
+              <path id="branchLine2" d="M 10 135 L 248 135" fill="none" stroke="#000000" stroke-width="1" marker-end="url(#arrowThin)" />
+              <text x="142" y="126" class="svg-branch-label">TCP :8002 (Node 2)</text>
+
+              <!-- Route to Node 3 (:8003) -->
+              <path id="branchLine3" d="M 10 135 L 95 135 L 135 225 L 248 225" fill="none" stroke="#000000" stroke-width="1" marker-end="url(#arrowThin)" />
+              <text x="142" y="216" class="svg-branch-label">TCP :8003 (Node 3)</text>
+
+              <!-- Moving Packet Marker on Active Branch -->
+              <rect id="branchPacketRect" x="10" y="129" width="12" height="12" fill="#000000" visibility="hidden" />
+            </svg>
+          </div>
+
+          <!-- Three Independent Data Node Cluster Cards -->
+          <div class="cluster-nodes-column">
+            <!-- Data Node 1 -->
+            <div class="cluster-node-card" id="clusterNodeCard1" data-node-id="1">
+              <div class="cluster-node-header">
+                <div>
+                  <strong class="cluster-node-title">Data Node 1 <code>:8001</code></strong>
+                  <span class="cluster-node-tag" id="clusterNodeStatus1">IDLE STANDBY</span>
+                </div>
+                <span class="mono-small">PID-ISOLATED PROCESS</span>
+              </div>
+              <div class="cluster-node-internals">
+                <div class="internal-box" id="node1LruBox">
+                  <div class="internal-box-head">
+                    <strong>LRU Cache</strong>
+                    <span id="node1CountLabel">0 / 5 entries</span>
+                  </div>
+                  <div class="internal-box-body mono-small" id="node1LruPreview">Empty (Head: —)</div>
+                </div>
+                <div class="internal-box" id="node1WalBox">
+                  <div class="internal-box-head">
+                    <strong>node_1.log</strong>
+                    <span id="node1WalSeqLabel">SEQ: 0</span>
+                  </div>
+                  <div class="internal-box-body mono-small" id="node1WalPreview">No WAL records</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Data Node 2 -->
+            <div class="cluster-node-card" id="clusterNodeCard2" data-node-id="2">
+              <div class="cluster-node-header">
+                <div>
+                  <strong class="cluster-node-title">Data Node 2 <code>:8002</code></strong>
+                  <span class="cluster-node-tag" id="clusterNodeStatus2">IDLE STANDBY</span>
+                </div>
+                <span class="mono-small">PID-ISOLATED PROCESS</span>
+              </div>
+              <div class="cluster-node-internals">
+                <div class="internal-box" id="node2LruBox">
+                  <div class="internal-box-head">
+                    <strong>LRU Cache</strong>
+                    <span id="node2CountLabel">0 / 5 entries</span>
+                  </div>
+                  <div class="internal-box-body mono-small" id="node2LruPreview">Empty (Head: —)</div>
+                </div>
+                <div class="internal-box" id="node2WalBox">
+                  <div class="internal-box-head">
+                    <strong>node_2.log</strong>
+                    <span id="node2WalSeqLabel">SEQ: 0</span>
+                  </div>
+                  <div class="internal-box-body mono-small" id="node2WalPreview">No WAL records</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Data Node 3 -->
+            <div class="cluster-node-card" id="clusterNodeCard3" data-node-id="3">
+              <div class="cluster-node-header">
+                <div>
+                  <strong class="cluster-node-title">Data Node 3 <code>:8003</code></strong>
+                  <span class="cluster-node-tag" id="clusterNodeStatus3">IDLE STANDBY</span>
+                </div>
+                <span class="mono-small">PID-ISOLATED PROCESS</span>
+              </div>
+              <div class="cluster-node-internals">
+                <div class="internal-box" id="node3LruBox">
+                  <div class="internal-box-head">
+                    <strong>LRU Cache</strong>
+                    <span id="node3CountLabel">0 / 5 entries</span>
+                  </div>
+                  <div class="internal-box-body mono-small" id="node3LruPreview">Empty (Head: —)</div>
+                </div>
+                <div class="internal-box" id="node3WalBox">
+                  <div class="internal-box-head">
+                    <strong>node_3.log</strong>
+                    <span id="node3WalSeqLabel">SEQ: 0</span>
+                  </div>
+                  <div class="internal-box-body mono-small" id="node3WalPreview">No WAL records</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Binary Protocol Frame Inspector Strip -->
+        <div class="protocol-packet-strip">
+          <div class="packet-half">
+            <div class="packet-label">BINARY REQUEST PACKET (10-BYTE HEADER + PAYLOAD)</div>
+            <div class="packet-fields" id="archReqPacketFields">
+              <span><strong>MAGIC:</strong> 0xDC</span>
+              <span><strong>OP:</strong> 0x02 (PUT)</span>
+              <span><strong>KEY_LEN:</strong> 12B</span>
+              <span><strong>VAL_LEN:</strong> 19B</span>
+              <span><strong>PAYLOAD:</strong> "session:4092" | "uid=8810;role=admin"</span>
+            </div>
+          </div>
+          <div class="packet-half">
+            <div class="packet-label">BINARY RESPONSE PACKET (16-BYTE HEADER + PAYLOAD)</div>
+            <div class="packet-fields" id="archResPacketFields">
+              <span><strong>MAGIC:</strong> 0xDC</span>
+              <span><strong>STATUS:</strong> --</span>
+              <span><strong>NODE_ID:</strong> --</span>
+              <span><strong>KEY_HASH:</strong> --</span>
+              <span><strong>VNODE_HASH:</strong> --</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Architecture Event Log -->
+      <div class="panel event-log-panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-index">LOG 1.2</span>
+            <strong class="panel-title">Step-by-Step Request Execution Event Log</strong>
+          </div>
+          <button type="button" id="clearArchLogBtn" class="btn btn-xs">Clear Log</button>
+        </div>
+        <div class="table-container">
+          <table class="lab-table">
+            <thead>
+              <tr>
+                <th style="width: 80px;">STEP</th>
+                <th style="width: 170px;">ACTION</th>
+                <th style="width: 210px;">COMPONENT</th>
+                <th>TECHNICAL EXPLANATION</th>
+              </tr>
+            </thead>
+            <tbody id="archEventLogBody">
+              <tr>
+                <td colspan="4" class="empty-cell">Select an operation (PUT, GET, or DELETE) and click <strong>Run</strong> or <strong>Step Forward</strong> to trace the packet lifecycle.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. CONSISTENT HASHING VISUALIZER -->
+    <section id="hashing" class="lab-section">
+      <div class="section-title-bar">
+        <div>
+          <div class="eyebrow">SECTION 02 · DETERMINISTIC KEY ROUTING</div>
+          <h2 class="section-heading">Consistent Hashing &amp; Virtual Node Ring Visualizer</h2>
+        </div>
+        <div class="section-meta-note">
+          Deterministic 32-bit <code>MurmurHash3_x86_32</code> · 3 Physical Nodes × 100 Virtual Nodes = 300 Ring Positions.
+        </div>
+      </div>
+
+      <div class="grid-12">
+        <!-- Left Column: Interactive Ring Canvas (7 cols) -->
+        <div class="col-span-7 panel">
+          <div class="panel-header">
+            <div>
+              <span class="panel-index">FIG 2.1</span>
+              <strong class="panel-title">32-Bit Hash Space Ring <code>[0, 2^32 - 1]</code> (300 Virtual Positions)</strong>
+            </div>
+            <span class="panel-annotation">Deterministic MurmurHash3_x86_32 (Seed = 0)</span>
+          </div>
+
+          <div class="ring-controls-bar">
+            <div class="ring-input-wrap">
+              <label class="control-label" for="ringKeyInput">KEY TO ROUTE</label>
+              <div class="input-with-btn">
+                <input type="text" id="ringKeyInput" class="lab-input mono" value="session:4092" placeholder="Enter any key string..." autocomplete="off" spellcheck="false" />
+                <button type="button" id="ringCalcBtn" class="btn btn-primary">Recalculate Route</button>
+              </div>
+            </div>
+            <div class="ring-quick-keys">
+              <span class="control-label">TRY KEYS:</span>
+              <button type="button" class="btn btn-xs ring-preset-btn" data-key="user:101">user:101</button>
+              <button type="button" class="btn btn-xs ring-preset-btn" data-key="order:8821">order:8821</button>
+              <button type="button" class="btn btn-xs ring-preset-btn" data-key="cache:block:7">cache:block:7</button>
+              <button type="button" class="btn btn-xs ring-preset-btn" data-key="metric:cpu:0">metric:cpu:0</button>
+              <button type="button" id="ringExecuteInArchBtn" class="btn btn-xs">Trace Key in Architecture ↑</button>
+            </div>
+          </div>
+
+          <div class="ring-svg-wrapper">
+            <svg id="hashRingSvg" viewBox="0 0 620 520" class="hash-ring-svg" role="img" aria-label="Consistent Hash Ring with 300 Virtual Positions">
+              <!-- Populated dynamically by deterministic MurmurHash3 ring renderer in app.js -->
+            </svg>
+          </div>
+
+          <div class="ring-legend-bar">
+            <div class="legend-item">
+              <span class="legend-tick tick-node1"></span>
+              <span><strong>Node 1 (:8001)</strong> — 100 VNodes (Outer Tick)</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-tick tick-node2"></span>
+              <span><strong>Node 2 (:8002)</strong> — 100 VNodes (Mid Tick)</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-tick tick-node3"></span>
+              <span><strong>Node 3 (:8003)</strong> — 100 VNodes (Inner Tick)</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-marker-square"></span>
+              <span><strong>Key Hash</strong> → Clockwise Successor VNode</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column: 5-Step Algorithm Breakdown & Virtual Node Explanation (5 cols) -->
+        <div class="col-span-5 stack-panels">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <span class="panel-index">ALG 2.2</span>
+                <strong class="panel-title">5-Step Consistent Hashing Routing Algorithm</strong>
+              </div>
+            </div>
+            <ol class="algo-step-list">
+              <li class="algo-step-item">
+                <div class="algo-step-head"><strong>1. The input key is hashed using MurmurHash3.</strong></div>
+                <div class="algo-step-detail mono" id="hashStep1Out">MurmurHash3_x86_32("session:4092", 0) = --</div>
+              </li>
+              <li class="algo-step-item">
+                <div class="algo-step-head"><strong>2. The resulting hash identifies a position in the hash space.</strong></div>
+                <div class="algo-step-detail mono" id="hashStep2Out">Ring Angle: --° on [0, 4,294,967,295]</div>
+              </li>
+              <li class="algo-step-item">
+                <div class="algo-step-head"><strong>3. The Coordinator locates the next clockwise virtual-node position using successor lookup.</strong></div>
+                <div class="algo-step-detail mono" id="hashStep3Out">std::map::lower_bound(hash) → --</div>
+              </li>
+              <li class="algo-step-item">
+                <div class="algo-step-head"><strong>4. The virtual-node position maps to a physical Data Node.</strong></div>
+                <div class="algo-step-detail mono" id="hashStep4Out">VNode "--" → Physical Data Node --</div>
+              </li>
+              <li class="algo-step-item">
+                <div class="algo-step-head"><strong>5. The Coordinator forwards the request to that node.</strong></div>
+                <div class="algo-step-detail mono" id="hashStep5Out">Raw TCP Binary Frame → 127.0.0.1:800X</div>
+              </li>
+            </ol>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <span class="panel-index">NOTE 2.3</span>
+                <strong class="panel-title">Why 100 Virtual Nodes per Physical Node?</strong>
+              </div>
+            </div>
+            <div class="panel-body-text">
+              <p>
+                With only 3 physical positions on the ring, random hash placement produces highly uneven arc lengths between nodes. By assigning <strong>100 virtual labels</strong> (<code>Node-1#VN-0</code> … <code>Node-3#VN-99</code>) to each physical Data Node—for <strong>300 total positions</strong> stored in <code>std::map&lt;uint32_t, VirtualNode&gt;</code>—ownership arcs are interleaved finely across <code>[0, 2^32 - 1]</code>.
+              </p>
+              <p class="technical-caveat">
+                <strong>Architectural Boundary &amp; Caveats:</strong> Consistent hashing provides finer-grained statistical keyspace distribution, but does <strong>not</strong> guarantee identical key counts per node. In DisCache, consistent hashing is strictly a partitioning and routing mechanism—it does <strong>not</strong> automatically provide data replication or failover if a node stops.
+              </p>
+            </div>
+            <div class="vnode-distribution-box">
+              <div class="vnode-dist-header">
+                <strong>Keyspace Arc Coverage &amp; Sample Batch Test</strong>
+                <button type="button" id="runKeySampleDistBtn" class="btn btn-xs">Hash 300 Sample Keys</button>
+              </div>
+              <table class="lab-table compact-table">
+                <thead>
+                  <tr>
+                    <th>PHYSICAL NODE</th>
+                    <th>VIRTUAL NODES</th>
+                    <th>RING ARC SHARE</th>
+                    <th id="sampleDistColHead">300-KEY SAMPLE</th>
+                  </tr>
+                </thead>
+                <tbody id="ringDistTableBody">
+                  <!-- Populated by app.js -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. CACHE ENGINE VISUALIZER & 8. CONCURRENCY AND NETWORKING VIEW -->
+    <section id="cache-engine" class="lab-section">
+      <div class="section-title-bar">
+        <div>
+          <div class="eyebrow">SECTION 03 · O(1) IN-MEMORY DATA STRUCTURES &amp; CONCURRENCY</div>
+          <h2 class="section-heading">LRU Cache Engine &amp; Socket Concurrency Visualizer</h2>
+        </div>
+        <div class="section-meta-note">
+          <code>std::unordered_map</code> + Custom Doubly Linked List · Default Capacity: <strong>100,000 entries</strong>.
+        </div>
+      </div>
+
+      <!-- Cache Engine Controls & Metrics Bar -->
+      <div class="panel control-deck">
+        <div class="control-row">
+          <div class="control-group">
+            <label class="control-label">INSPECTED DATA NODE</label>
+            <div class="segmented-group" id="cacheNodeSelectGroup">
+              <button type="button" class="seg-btn active" data-node="1">Data Node 1 (:8001)</button>
+              <button type="button" class="seg-btn" data-node="2">Data Node 2 (:8002)</button>
+              <button type="button" class="seg-btn" data-node="3">Data Node 3 (:8003)</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="cacheDemoCapInput" title="Small demo capacity for observing evictions; C++ system default is 100,000 entries">DEMO CAPACITY (DEFAULT: 100,000)</label>
+            <div class="input-with-btn">
+              <input type="number" id="cacheDemoCapInput" class="lab-input mono" min="2" max="100000" value="5" style="width: 90px;" />
+              <button type="button" id="applyCacheCapBtn" class="btn btn-secondary">Apply</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">DIRECT NODE OPERATION</label>
+            <div class="segmented-group" id="cacheOpGroup">
+              <button type="button" class="seg-btn active" data-op="PUT">PUT</button>
+              <button type="button" class="seg-btn" data-op="GET">GET</button>
+              <button type="button" class="seg-btn" data-op="DELETE">DELETE</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="cacheKeyInput">KEY</label>
+            <input type="text" id="cacheKeyInput" class="lab-input mono" value="k_alpha" placeholder="Key" style="width: 120px;" />
+          </div>
+
+          <div class="control-group" id="cacheValWrap">
+            <label class="control-label" for="cacheValInput">VALUE</label>
+            <input type="text" id="cacheValInput" class="lab-input mono" value="v_100" placeholder="Value" style="width: 120px;" />
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">EXECUTE / SEED</label>
+            <div class="action-btns">
+              <button type="button" id="cacheExecBtn" class="btn btn-primary">Step Operation</button>
+              <button type="button" id="cacheSeedEvictBtn" class="btn btn-secondary" title="Fill node to capacity so the next new PUT triggers an LRU tail eviction">Fill to Capacity</button>
+              <button type="button" id="cacheClearNodeBtn" class="btn btn-secondary">Clear Node</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4 Key LRU State Metrics + System Default Capacity Banner -->
+      <div class="metrics-strip-5">
+        <div class="metric-tile">
+          <div class="metric-label">CURRENT ENTRY COUNT</div>
+          <div class="metric-val mono" id="lruMetricSize">0</div>
+          <div class="metric-sub">Active keys in node</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">CONFIGURED CAPACITY</div>
+          <div class="metric-val mono" id="lruMetricCap">5 <small>(Demo)</small></div>
+          <div class="metric-sub">System Default: <strong>100,000</strong></div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">MOST RECENTLY USED (HEAD)</div>
+          <div class="metric-val mono" id="lruMetricMRU">—</div>
+          <div class="metric-sub">Doubly Linked List <code>head_</code></div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">LEAST RECENTLY USED (TAIL)</div>
+          <div class="metric-val mono" id="lruMetricLRU">—</div>
+          <div class="metric-sub">Evicted next when full (<code>tail_</code>)</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">HITS / MISSES / EVICTIONS</div>
+          <div class="metric-val mono" id="lruMetricCounters">0 / 0 / 0</div>
+          <div class="metric-sub">All operations O(1) time</div>
+        </div>
+      </div>
+
+      <div class="grid-12">
+        <!-- Doubly Linked List + Hash Map Visualization (8 cols) -->
+        <div class="col-span-8 stack-panels">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <span class="panel-index">FIG 3.1</span>
+                <strong class="panel-title">Custom Doubly Linked List (Recency Order: MRU Head ↔ LRU Tail)</strong>
+              </div>
+              <span class="panel-annotation" id="lruLastOpBanner">O(1) Pointer Splice on GET / PUT / DELETE</span>
+            </div>
+            <div class="dll-canvas" id="dllVisualizerContainer">
+              <!-- Rendered dynamically by app.js -->
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <span class="panel-index">TBL 3.2</span>
+                <strong class="panel-title">Hash Map Index (<code>std::unordered_map&lt;std::string, Node*&gt;</code>)</strong>
+              </div>
+              <span class="panel-annotation">Maps keys to Doubly Linked List Node pointers in O(1) average time</span>
+            </div>
+            <div class="table-container">
+              <table class="lab-table">
+                <thead>
+                  <tr>
+                    <th>KEY</th>
+                    <th>VALUE</th>
+                    <th>HASH BUCKET</th>
+                    <th>LIST POINTER</th>
+                    <th>RECENCY POSITION</th>
+                  </tr>
+                </thead>
+                <tbody id="lruTableBody">
+                  <!-- Rendered dynamically by app.js -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Structural Explanation (4 cols) -->
+        <div class="col-span-4 stack-panels">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <span class="panel-index">DOC 3.3</span>
+                <strong class="panel-title">O(1) LRU Cache Mechanics</strong>
+              </div>
+            </div>
+            <ul class="mechanics-list">
+              <li>
+                <strong>Hash Map Lookup (O(1)):</strong> <code>std::unordered_map</code> maps each key string directly to its <code>Node*</code> address inside the doubly linked list, avoiding linear scans.
+              </li>
+              <li>
+                <strong>Recency Tracking (O(1)):</strong> A custom doubly linked list maintains recency order. The <strong>HEAD</strong> pointer tracks the Most Recently Used (MRU) entry; the <strong>TAIL</strong> pointer tracks the Least Recently Used (LRU) entry.
+              </li>
+              <li>
+                <strong>GET &amp; PUT Promotion (O(1)):</strong> Successful <code>GET</code> and <code>PUT</code> operations detach the target <code>Node*</code> via its <code>prev</code> and <code>next</code> pointers and attach it at <code>HEAD</code>.
+              </li>
+              <li>
+                <strong>DELETE Removal (O(1)):</strong> <code>DELETE</code> detaches the node from its neighbors and erases the key from <code>std::unordered_map</code>.
+              </li>
+              <li>
+                <strong>Capacity Eviction (O(1)):</strong> When <code>size == capacity</code> (100,000 by default, configurable above for experiments), inserting a new key unlinks <code>TAIL</code> (the LRU entry) before inserting the new node at <code>HEAD</code>.
+              </li>
+              <li>
+                <strong>Strict Scope:</strong> No TTL, no EXPIRE timers, no transactions, and no alternative eviction policies are introduced.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- 8. CONCURRENCY AND NETWORKING VIEW -->
+      <div class="panel concurrency-panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-index">FIG 3.4</span>
+            <strong class="panel-title">Data Node Concurrency &amp; Networking Pipeline</strong>
+          </div>
+          <div class="concurrency-controls">
+            <button type="button" id="traceConcurrencyReadBtn" class="btn btn-xs">Trace GET (Reader Path)</button>
+            <button type="button" id="traceConcurrencyWriteBtn" class="btn btn-xs">Trace PUT/DELETE (Mutation Path)</button>
+          </div>
+        </div>
+
+        <div class="concurrency-flow-grid" id="concurrencyFlowGrid">
+          <div class="conc-stage" id="concStage1">
+            <div class="conc-num">01 / INGRESS</div>
+            <div class="conc-name">TCP Sockets</div>
+            <p class="conc-sentence">
+              Accepts persistent raw TCP binary connections from the Coordinator or load-test workers on port <code>8001–8003</code>.
+            </p>
+          </div>
+          <div class="conc-arrow" aria-hidden="true">──►</div>
+          <div class="conc-stage" id="concStage2">
+            <div class="conc-num">02 / EVENT LOOP</div>
+            <div class="conc-name">select() I/O Multiplexing</div>
+            <p class="conc-sentence">
+              Monitors multiple open socket file descriptors in a single event loop to detect readable sockets without blocking one thread per idle connection.
+            </p>
+          </div>
+          <div class="conc-arrow" aria-hidden="true">──►</div>
+          <div class="conc-stage" id="concStage3">
+            <div class="conc-num">03 / DISPATCH</div>
+            <div class="conc-name">Request Handling / Work Queue</div>
+            <p class="conc-sentence">
+              Decouples the socket readiness notification stage from request execution by placing ready socket descriptors into a synchronization-protected bounded queue.
+            </p>
+          </div>
+          <div class="conc-arrow" aria-hidden="true">──►</div>
+          <div class="conc-stage" id="concStage4">
+            <div class="conc-num">04 / EXECUTION</div>
+            <div class="conc-name">Bounded Thread Pool</div>
+            <p class="conc-sentence">
+              A fixed pool of pre-allocated worker threads dequeues socket tasks, parses the 10-byte binary frame, and executes operations without unbounded thread creation.
+            </p>
+          </div>
+          <div class="conc-arrow" aria-hidden="true">──►</div>
+          <div class="conc-stage" id="concStage5">
+            <div class="conc-num">05 / SYNCHRONIZATION</div>
+            <div class="conc-name">Cache Operation (<code>std::shared_mutex</code>)</div>
+            <p class="conc-sentence">
+              Coordinates reader and writer thread access to shared cache state so concurrent workers never corrupt hash-map buckets or linked-list pointers.
+            </p>
+          </div>
+        </div>
+
+        <div class="concurrency-sync-explainer">
+          <div class="sync-card" id="syncReadCard">
+            <strong>READ REQUESTS (<code>GET</code>) &amp; <code>std::shared_mutex</code></strong>
+            <p>
+              <code>std::shared_mutex</code> supports shared reader locks (<code>std::shared_lock</code>) for read-only state inspection and exclusive locks (<code>std::unique_lock</code>) whenever the doubly linked list recency pointers (<code>head_</code>, <code>tail_</code>, <code>prev</code>, <code>next</code>) are mutated to promote a hit entry to MRU. Operations do <strong>not</strong> execute unsynchronized in parallel.
+            </p>
+          </div>
+          <div class="sync-card" id="syncWriteCard">
+            <strong>MUTATION REQUESTS (<code>PUT</code> / <code>DELETE</code>)</strong>
+            <p>
+              Mutations serialize through the node's Write-Ahead Log mutex (append + durable disk flush) and acquire an exclusive lock (<code>std::unique_lock&lt;std::shared_mutex&gt;</code>) on the <code>LRUCache</code> before modifying hash-map entries and linked-list pointers.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 9. WAL AND CRASH-RECOVERY VISUALIZER -->
+    <section id="wal-recovery" class="lab-section">
+      <div class="section-title-bar">
+        <div>
+          <div class="eyebrow">SECTION 04 · DURABILITY &amp; CRASH RECOVERY</div>
+          <h2 class="section-heading">Write-Ahead Log (WAL) &amp; Crash-Recovery Visualizer</h2>
+        </div>
+        <div class="section-meta-note">
+          Per-Node Sequential Log (<code>node_1.log</code>, <code>node_2.log</code>, <code>node_3.log</code>) · Local Replay Only (No Replication).
+        </div>
+      </div>
+
+      <!-- Node WAL Mapping & Mutation Workflow Banner -->
+      <div class="panel wal-workflow-panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-index">FIG 4.1</span>
+            <strong class="panel-title">Durable Mutation Workflow &amp; Per-Node Log Isolation</strong>
+          </div>
+          <span class="panel-annotation" id="walSimNoticeBadge">VISUAL SIMULATION / LIVE NODE ADAPTER</span>
+        </div>
+
+        <div class="wal-mapping-strip">
+          <button type="button" class="wal-node-tab active" data-node="1">
+            <strong>Data Node 1 (:8001)</strong>
+            <span>→ <code>node_1.log</code></span>
+          </button>
+          <button type="button" class="wal-node-tab" data-node="2">
+            <strong>Data Node 2 (:8002)</strong>
+            <span>→ <code>node_2.log</code></span>
+          </button>
+          <button type="button" class="wal-node-tab" data-node="3">
+            <strong>Data Node 3 (:8003)</strong>
+            <span>→ <code>node_3.log</code></span>
+          </button>
+        </div>
+
+        <div class="mutation-pipeline" id="walMutationPipeline">
+          <div class="mut-step" id="mutStep1">
+            <span class="mut-idx">STEP 1</span>
+            <strong>PUT or DELETE</strong>
+            <small>Incoming Mutation</small>
+          </div>
+          <span class="mut-arrow">→</span>
+          <div class="mut-step" id="mutStep2">
+            <span class="mut-idx">STEP 2</span>
+            <strong>Append WAL Record</strong>
+            <small>Sequential Log Write</small>
+          </div>
+          <span class="mut-arrow">→</span>
+          <div class="mut-step" id="mutStep3">
+            <span class="mut-idx">STEP 3</span>
+            <strong>Flush Durable Record</strong>
+            <small>Stream Flush to Disk</small>
+          </div>
+          <span class="mut-arrow">→</span>
+          <div class="mut-step" id="mutStep4">
+            <span class="mut-idx">STEP 4</span>
+            <strong>Update In-Memory Cache</strong>
+            <small>LRUCache Mutation</small>
+          </div>
+          <span class="mut-arrow">→</span>
+          <div class="mut-step" id="mutStep5">
+            <span class="mut-idx">STEP 5</span>
+            <strong>Return Success</strong>
+            <small>0xDC STATUS_OK</small>
+          </div>
+        </div>
+      </div>
+
+      <!-- Interactive Mutation + 6-Step Crash Recovery Laboratory -->
+      <div class="panel control-deck">
+        <div class="control-row">
+          <div class="control-group">
+            <label class="control-label">RECORD MUTATION ON <span id="walSelectedNodeLabel">NODE 1</span></label>
+            <div class="input-with-btn">
+              <select id="walOpSelect" class="lab-select mono">
+                <option value="PUT">PUT</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+              <input type="text" id="walKeyInput" class="lab-input mono" value="acct:301" placeholder="Key" style="width: 115px;" />
+              <input type="text" id="walValInput" class="lab-input mono" value="bal=4500" placeholder="Value" style="width: 125px;" />
+              <button type="button" id="walAppendBtn" class="btn btn-primary">Execute Mutation</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">CRASH &amp; SEQUENTIAL RECOVERY DEMONSTRATION (STEPS 1–6)</label>
+            <div class="action-btns">
+              <button type="button" id="walRunRecoveryBtn" class="btn btn-primary">Run Crash &amp; Recovery</button>
+              <button type="button" id="walStepRecoveryBtn" class="btn btn-secondary">Step Recovery (1→6)</button>
+              <button type="button" id="walResetDemoBtn" class="btn btn-secondary">Seed Sample WAL</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6-Stage Recovery Progress Strip -->
+      <div class="recovery-steps-strip" id="recoveryStepsStrip">
+        <div class="rec-stage-box active" data-rec-step="1">
+          <span class="rec-num">STAGE 1</span>
+          <strong>Active Node State</strong>
+          <small>Cache + WAL Populated</small>
+        </div>
+        <div class="rec-stage-box" data-rec-step="2">
+          <span class="rec-num">STAGE 2</span>
+          <strong>Simulate Node Restart</strong>
+          <small>Process Termination</small>
+        </div>
+        <div class="rec-stage-box" data-rec-step="3">
+          <span class="rec-num">STAGE 3</span>
+          <strong>Clear In-Memory State</strong>
+          <small>Volatile RAM Lost (0 Keys)</small>
+        </div>
+        <div class="rec-stage-box" data-rec-step="4">
+          <span class="rec-num">STAGE 4</span>
+          <strong>Replay WAL in Order</strong>
+          <small>Sequential Log Scan</small>
+        </div>
+        <div class="rec-stage-box" data-rec-step="5">
+          <span class="rec-num">STAGE 5</span>
+          <strong>Reconstructed Cache</strong>
+          <small>State Restored in LRU</small>
+        </div>
+        <div class="rec-stage-box" data-rec-step="6">
+          <span class="rec-num">STAGE 6</span>
+          <strong>Recovery Status</strong>
+          <small id="recStage6Text">PENDING</small>
+        </div>
+      </div>
+
+      <div class="grid-12">
+        <!-- Left: Sequential WAL File Log (6 cols) -->
+        <div class="col-span-6 panel">
+          <div class="panel-header">
+            <div>
+              <span class="panel-index">LOG 4.2</span>
+              <strong class="panel-title">Sequential Write-Ahead Log (<code id="walFileHeaderName">node_1.log</code>)</strong>
+            </div>
+            <span class="panel-annotation">Durable Disk File · Survives Process Restart</span>
+          </div>
+          <div class="table-container">
+            <table class="lab-table">
+              <thead>
+                <tr>
+                  <th style="width: 70px;">SEQ #</th>
+                  <th style="width: 95px;">OPERATION</th>
+                  <th>KEY</th>
+                  <th>VALUE</th>
+                  <th style="width: 130px;">REPLAY STATUS</th>
+                </tr>
+              </thead>
+              <tbody id="walLogTableBody">
+                <!-- Populated by app.js -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right: In-Memory Cache Before/During/After Recovery (6 cols) -->
+        <div class="col-span-6 panel">
+          <div class="panel-header">
+            <div>
+              <span class="panel-index">MEM 4.3</span>
+              <strong class="panel-title">Node In-Memory LRU Cache State (Volatile RAM)</strong>
+            </div>
+            <span class="panel-annotation" id="walRecoveryBannerText">STATE: ONLINE (SYNCHRONIZED WITH WAL)</span>
+          </div>
+          <div class="table-container">
+            <table class="lab-table">
+              <thead>
+                <tr>
+                  <th style="width: 90px;">ORDER</th>
+                  <th>KEY</th>
+                  <th>VALUE</th>
+                  <th>SOURCE</th>
+                </tr>
+              </thead>
+              <tbody id="walMemoryTableBody">
+                <!-- Populated by app.js -->
+              </tbody>
+            </table>
+          </div>
+          <div class="panel-footer-note">
+            <strong>Scope Guarantee:</strong> Recovery reads only this node's local WAL file (<code id="walFooterFile">node_1.log</code>) sequentially from start to end. No cross-node data copying, replication, snapshots, or Raft consensus is used.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 10. PERFORMANCE LAB -->
+    <section id="performance" class="lab-section">
+      <div class="section-title-bar">
+        <div>
+          <div class="eyebrow">SECTION 05 · MULTI-THREADED LOAD TESTING &amp; LATENCY TELEMETRY</div>
+          <h2 class="section-heading">Performance Lab — Python Load Tester Interface</h2>
+        </div>
+        <div class="section-meta-note">
+          50+ Concurrent Worker Threads · Separate Views for Individual Data Node vs. Full Coordinator-Routed Cluster.
+        </div>
+      </div>
+
+      <!-- View Mode Selector + Data Provenance Banner -->
+      <div class="perf-top-bar">
+        <div class="segmented-group" id="perfViewModeGroup" role="tablist">
+          <button type="button" class="seg-btn active" data-view="coordinator">
+            1. End-to-End Coordinator-Routed System (:8000)
+          </button>
+          <button type="button" class="seg-btn" data-view="single_node">
+            2. Individual Data Node Benchmark (:8001 / :8002 / :8003)
+          </button>
+        </div>
+
+        <div class="provenance-banner" id="perfProvenanceBanner">
+          DATA SOURCE: <strong>ILLUSTRATIVE DATA (SIMULATED)</strong> — Run Live Python Load Tester or Import JSON for Measured Execution Data
+        </div>
+      </div>
+
+      <!-- Workload Configuration Deck -->
+      <div class="panel control-deck">
+        <div class="control-row">
+          <div class="control-group" id="perfNodeTargetWrap" hidden>
+            <label class="control-label" for="perfSingleNodeSelect">TARGET DATA NODE</label>
+            <select id="perfSingleNodeSelect" class="lab-select mono">
+              <option value="node_1">Data Node 1 (:8001)</option>
+              <option value="node_2">Data Node 2 (:8002)</option>
+              <option value="node_3">Data Node 3 (:8003)</option>
+            </select>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="perfGetPct">GET %</label>
+            <input type="number" id="perfGetPct" class="lab-input mono" min="0" max="100" value="70" style="width: 78px;" />
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="perfPutPct">PUT %</label>
+            <input type="number" id="perfPutPct" class="lab-input mono" min="0" max="100" value="20" style="width: 78px;" />
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="perfDelPct">DELETE %</label>
+            <input type="number" id="perfDelPct" class="lab-input mono" min="0" max="100" value="10" style="width: 78px;" />
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="perfWorkersInput" title="Supports 50 or more concurrent worker threads">CONCURRENCY (WORKERS)</label>
+            <input type="number" id="perfWorkersInput" class="lab-input mono" min="1" max="200" value="50" style="width: 90px;" />
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="perfTotalReqsInput">TOTAL REQUESTS</label>
+            <input type="number" id="perfTotalReqsInput" class="lab-input mono" min="100" max="20000" step="100" value="2500" style="width: 105px;" />
+          </div>
+
+          <div class="control-group control-actions">
+            <label class="control-label">BENCHMARK ACTIONS</label>
+            <div class="action-btns">
+              <button type="button" id="runLiveBenchBtn" class="btn btn-primary" title="Execute load_tester.py against live C++ processes if bridge is connected, or run deterministic simulation">
+                Run Benchmark
+              </button>
+              <button type="button" id="loadIllustrativeBtn" class="btn btn-secondary">
+                Generate Illustrative Sample
+              </button>
+              <label class="btn btn-secondary file-btn-label" for="importBenchJsonInput">
+                Import JSON
+                <input type="file" id="importBenchJsonInput" accept=".json" hidden />
+              </label>
+            </div>
+          </div>
+        </div>
+        <div id="perfValidationMsg" class="validation-banner" hidden></div>
+      </div>
+
+      <!-- Primary Performance Metrics Strip -->
+      <div class="metrics-strip-6">
+        <div class="metric-tile">
+          <div class="metric-label">TOTAL REQUESTS</div>
+          <div class="metric-val mono" id="perfMetricTotal">--</div>
+          <div class="metric-sub" id="perfMetricMixSub">Workload mix</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">SUCCESSFUL OPS</div>
+          <div class="metric-val mono" id="perfMetricSuccess">--</div>
+          <div class="metric-sub">Valid binary responses</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">FAILED OPS</div>
+          <div class="metric-val mono" id="perfMetricFailed">--</div>
+          <div class="metric-sub">Socket / protocol errors</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">THROUGHPUT (OPS/SEC)</div>
+          <div class="metric-val mono" id="perfMetricThroughput">--</div>
+          <div class="metric-sub" id="perfMetricWorkersSub">50 concurrent workers</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">P50 LATENCY (MEDIAN)</div>
+          <div class="metric-val mono" id="perfMetricP50">--</div>
+          <div class="metric-sub">50th percentile RTT</div>
+        </div>
+        <div class="metric-tile">
+          <div class="metric-label">P99 LATENCY (TAIL)</div>
+          <div class="metric-val mono" id="perfMetricP99">--</div>
+          <div class="metric-sub">99th percentile RTT</div>
+        </div>
+      </div>
+
+      <!-- Charts Grid -->
+      <div class="grid-12">
+        <!-- Line Chart: Throughput & Latency Over Benchmark Windows (6 cols) -->
+        <div class="col-span-6 panel">
+          <div class="panel-header">
+            <div>
+              <span class="panel-index">CHART 5.1</span>
+              <strong class="panel-title">Throughput (ops/sec) &amp; Latency Across Execution Windows</strong>
+            </div>
+            <span class="panel-annotation" id="chart51SourceTag">ILLUSTRATIVE DATA</span>
+          </div>
+          <div class="chart-svg-box">
+            <svg id="perfLineChartSvg" viewBox="0 0 560 250" class="lab-chart-svg" role="img" aria-label="Throughput and Latency Line Chart"></svg>
+          </div>
+        </div>
+
+        <!-- Bar Chart: Latency Percentile Distribution & Per-Node Request Distribution (6 cols) -->
+        <div class="col-span-6 panel">
+          <div class="panel-header">
+            <div>
+              <span class="panel-index">CHART 5.2</span>
+              <strong class="panel-title">Per-Node Request Distribution &amp; Latency Percentiles</strong>
+            </div>
+            <span class="panel-annotation" id="chart52SourceTag">ILLUSTRATIVE DATA</span>
+          </div>
+          <div class="chart-svg-box">
+            <svg id="perfBarChartSvg" viewBox="0 0 560 250" class="lab-chart-svg" role="img" aria-label="Per-Node Request Distribution and Latency Percentiles Bar Chart"></svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Comparison Table: Individual Data Node vs Full Coordinator-Routed System -->
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <span class="panel-index">TBL 5.3</span>
+            <strong class="panel-title">Benchmark Comparison: Individual Data Node vs. Full Coordinator-Routed System</strong>
+          </div>
+          <span class="panel-annotation">Coordinator routing adds one TCP hop + MurmurHash3 lookup; adding nodes partitions keyspace but does not automatically multiply single-coordinator throughput</span>
+        </div>
+        <div class="table-container">
+          <table class="lab-table">
+            <thead>
+              <tr>
+                <th>BENCHMARK TARGET</th>
+                <th>DATA PROVENANCE</th>
+                <th>WORKERS</th>
+                <th>WORKLOAD (GET/PUT/DEL)</th>
+                <th>TOTAL REQS</th>
+                <th>SUCCESS / FAIL</th>
+                <th>THROUGHPUT</th>
+                <th>P50 LATENCY</th>
+                <th>P99 LATENCY</th>
+                <th>PER-NODE DISTRIBUTION (N1 / N2 / N3)</th>
+              </tr>
+            </thead>
+            <tbody id="perfComparisonTableBody">
+              <!-- Populated by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 14. SYSTEMS ENGINEERING REFERENCE SUMMARY (10 CORE QUESTIONS) -->
+    <section id="reference-summary" class="lab-section">
+      <div class="section-title-bar">
+        <div>
+          <div class="eyebrow">SECTION 06 · ARCHITECTURAL SPECIFICATION MATRIX</div>
+          <h2 class="section-heading">Systems Engineering Reference &amp; Verification Guide</h2>
+        </div>
+        <div class="section-meta-note">
+          Summary of the 10 core engineering mechanisms demonstrated in DisCache.
+        </div>
+      </div>
+
+      <div class="reference-grid">
+        <div class="ref-card">
+          <div class="ref-num">01 · SYSTEM IDENTITY</div>
+          <strong>What is DisCache?</strong>
+          <p>A dependency-free distributed in-memory key-value caching system written from scratch in C++20 using raw TCP sockets and a custom binary framing protocol (<code>0xDC</code>).</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">02 · PROCESS TOPOLOGY</div>
+          <strong>Why 1 Coordinator and 3 Data Nodes?</strong>
+          <p>Separates stateless consistent-hash request routing (Coordinator <code>:8000</code>) from stateful in-memory storage and local WAL persistence across three isolated Data Node processes (<code>:8001–:8003</code>).</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">03 · HASH RING ROUTING</div>
+          <strong>How does consistent hashing select a node?</strong>
+          <p>The key is hashed via 32-bit <code>MurmurHash3_x86_32</code>, and the Coordinator executes <code>std::map::lower_bound(hash)</code> to find the next clockwise virtual node, wrapping to <code>begin()</code> past <code>2^32 - 1</code>.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">04 · VIRTUAL NODES</div>
+          <strong>What do the 100 virtual nodes accomplish?</strong>
+          <p>Mapping each physical node to 100 positions (300 total ring entries) interleaves arcs across the 32-bit ring for finer-grained keyspace partitioning than 3 raw points.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">05 · O(1) LRU ENGINE</div>
+          <strong>How does the LRU data structure work?</strong>
+          <p>Combines <code>std::unordered_map&lt;string, Node*&gt;</code> for O(1) lookup with a custom doubly linked list where <code>HEAD</code> is MRU and <code>TAIL</code> is evicted in O(1) when capacity is reached.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">06 · NETWORK &amp; CONCURRENCY</div>
+          <strong>How are sockets and concurrency organized?</strong>
+          <p>Each node uses <code>select()</code> I/O multiplexing to detect readable sockets, dispatches requests to a bounded worker thread pool, and guards cache state with <code>std::shared_mutex</code>.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">07 · WRITE-AHEAD LOGGING</div>
+          <strong>Why does a mutation enter WAL before success?</strong>
+          <p>Appending and flushing the record to <code>node_X.log</code> before updating volatile RAM guarantees that any acknowledged <code>PUT</code> or <code>DELETE</code> can be recovered after a process crash.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">08 · CRASH RECOVERY</div>
+          <strong>How is cache state reconstructed after restart?</strong>
+          <p>At startup, each Data Node reads its local <code>node_X.log</code> sequentially from beginning to end, re-applying recorded <code>PUT</code> and <code>DELETE</code> operations to rebuild its <code>LRUCache</code>.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">09 · BENCHMARKING</div>
+          <strong>How are throughput, P50, and P99 measured?</strong>
+          <p><code>load_tester.py</code> spawns 50+ concurrent worker threads issuing timed binary TCP requests, dividing total completed ops by wall-clock time and sorting per-op RTTs for P50 and P99.</p>
+        </div>
+        <div class="ref-card">
+          <div class="ref-num">10 · EXECUTION BOUNDARY</div>
+          <strong>Which elements are simulated vs. live execution?</strong>
+          <p>In Demo Mode, the browser runs a deterministic JS engine with identical MurmurHash3 and LRU logic. When connected via <code>bridge.js</code>, commands and Python benchmarks execute against the live C++20 processes.</p>
+        </div>
+      </div>
+    </section>
   </main>
-  <aside id="drawer" class="drawer"><div class="drawer-head"><div><span class="eyebrow">WIRE INSPECTOR</span><h2>Last exchange</h2></div><button id="closeWire" class="icon-button">×</button></div><div class="wire-block"><label>SENT / RESP ARRAY</label><pre id="requestWire">No command sent.</pre></div><div class="wire-block"><label>RECEIVED / RAW RESP</label><pre id="responseWire">No response received.</pre></div><div class="wire-meta"><span>ROUND TRIP</span><strong id="wireTime">--</strong></div></aside><div id="scrim" class="scrim"></div><script src="/app.js"></script>
+
+  <footer class="lab-footer">
+    <div class="footer-inner">
+      <div><strong>DisCache</strong> — Distributed In-Memory Caching System · BTech Computer Science &amp; Engineering Project</div>
+      <div>C++20 · Raw TCP Binary Protocol · MurmurHash3 · O(1) LRU · Per-Node WAL · Python 50-Worker Load Harness</div>
+    </div>
+  </footer>
+
+  <script src="/app.js"></script>
 </body>
 </html>

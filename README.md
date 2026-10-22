@@ -115,3 +115,28 @@ Benchmark an individual Data Node (`:8001`) directly:
 ```bash
 python load_tester.py --host 127.0.0.1 --port 8001 --target node_1 --workers 50 --requests 2500 --out benchmark_node1.json
 ```
+
+## 6. Using DisCache from a Node.js Project
+
+The `client/` directory contains an installable Node.js client for applications
+that want to use the real C++ cluster. Start the cluster, then install the SDK
+from your application directory:
+
+```bash
+npm install ../DISCACHE/client
+```
+
+Use it from JavaScript or TypeScript:
+
+```js
+const { DisCacheClient } = require('@discache/client');
+
+const cache = new DisCacheClient({ host: '127.0.0.1', port: 8000 });
+await cache.put('user:42', JSON.stringify({ name: 'Alice' }));
+const value = await cache.get('user:42');
+console.log(value === null ? 'cache miss' : JSON.parse(value));
+```
+
+See [client/README.md](client/README.md) for TypeScript signatures, full
+examples, and method behavior. This SDK speaks DisCache's custom binary
+protocol; it is not compatible with Redis client libraries or Redis protocol.

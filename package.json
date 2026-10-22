@@ -6,7 +6,8 @@
   "description": "DisCache — Interactive Distributed Systems Lab & Binary TCP Adapter",
   "scripts": {
     "start": "node bridge.js",
-    "benchmark": "python load_tester.py --workers 50 --requests 2500"
+    "benchmark": "python load_tester.py --workers 50 --requests 2500",
+    "test": "node --test client/test/client.test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

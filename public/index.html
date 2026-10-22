@@ -3,82 +3,408 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DisCache — Distributed Systems Lab</title>
+  <meta name="theme-color" content="#0b0b0d" />
+  <title>DisCache — Distributed In-Memory Cache</title>
   <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/product.css" />
 </head>
 <body>
-  <!-- 3. GLOBAL NAVIGATION -->
-  <header class="topbar" role="banner">
-    <div class="topbar-inner">
-      <div class="brand-group">
-        <a href="#overview" class="wordmark">DisCache</a>
-        <span class="brand-divider">|</span>
-        <span class="brand-subtitle">Distributed Systems Lab</span>
-      </div>
-
-      <nav class="main-nav" aria-label="Laboratory Sections">
-        <a href="#overview" class="nav-link active" data-section="overview">Overview</a>
-        <a href="#architecture" class="nav-link" data-section="architecture">Architecture</a>
-        <a href="#hashing" class="nav-link" data-section="hashing">Consistent Hashing</a>
-        <a href="#cache-engine" class="nav-link" data-section="cache-engine">Cache Engine</a>
-        <a href="#wal-recovery" class="nav-link" data-section="wal-recovery">WAL Recovery</a>
-        <a href="#performance" class="nav-link" data-section="performance">Performance</a>
+  <header class="dc-header">
+    <div class="dc-header-inner">
+      <a href="/" class="dc-wordmark" data-route-link aria-label="DisCache home">DisCache<span>.</span></a>
+      <nav class="dc-nav" aria-label="Main navigation">
+        <a href="/" class="dc-nav-link" data-route-link>Home</a>
+        <a href="/playground" class="dc-nav-link" data-route-link>Playground</a>
+        <a href="/how-it-works" class="dc-nav-link" data-route-link>How it works</a>
+        <a href="/performance" class="dc-nav-link" data-route-link>Performance</a>
+        <a href="/guide" class="dc-nav-link" data-route-link>User guide</a>
       </nav>
-
-      <div class="topbar-controls">
-        <button id="modeToggleBtn" class="mode-badge" type="button" title="Toggle between self-contained deterministic Demo Mode and Live C++ TCP Cluster Mode">
-          <span id="modeBadgeText">DEMO MODE: SIMULATED DATA</span>
+      <div class="dc-header-actions">
+        <label class="sr-only" for="themeSelect">Color theme</label>
+        <select id="themeSelect" class="dc-theme-select" aria-label="Color theme">
+          <option value="system">System</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+        <button id="modeToggleBtn" class="dc-mode-button" type="button" title="Live mode is available when the coordinator and all three data nodes are connected">
+          <span class="dc-status-dot" aria-hidden="true"></span>
+          <span id="modeBadgeText">Demo · simulated</span>
         </button>
-        <button id="motionToggleBtn" class="motion-btn" type="button" title="Toggle reduced motion for packet animations">
-          <span id="motionBtnText">MOTION: STANDARD</span>
+        <button id="motionToggleBtn" class="dc-motion-button" type="button" aria-label="Toggle reduced motion" aria-pressed="false" title="Toggle reduced motion">
+          <span id="motionBtnText">Motion</span>
         </button>
       </div>
     </div>
   </header>
 
-  <main class="lab-canvas">
+  <main class="dc-main">
+    <section class="dc-page" id="productHome" aria-labelledby="homeTitle">
+      <div class="dc-hero">
+        <div class="dc-hero-copy">
+          <span class="dc-eyebrow"><span class="dc-status-dot"></span> A distributed cache you can try</span>
+          <h1 id="homeTitle">One key. One route.<br><span>Three cache nodes.</span></h1>
+          <p>DisCache stores values in memory and routes each key to the right node. Try a request, then see how it works.</p>
+          <div class="dc-hero-actions">
+            <a class="dc-button dc-button-primary" href="/playground" data-route-link>Try the demo <span aria-hidden="true">→</span></a>
+            <a class="dc-text-link" href="/how-it-works" data-route-link>How it works <span aria-hidden="true">↗</span></a>
+            <a class="dc-text-link" href="/guide" data-route-link>Take the tour <span aria-hidden="true">↗</span></a>
+          </div>
+          <p class="dc-hero-note"><span class="dc-status-dot"></span> Runs as a browser simulation. Connect the C++ cluster to try live requests.</p>
+        </div>
+        <div class="dc-map-card" aria-label="DisCache system overview">
+          <div class="dc-map-label">ONE COORDINATOR · THREE DATA NODES</div>
+          <div class="dc-system-map" id="homeSystemMap">
+            <div class="dc-map-client">Your app</div>
+            <div class="dc-map-link" aria-hidden="true"></div>
+            <div class="dc-map-coordinator">Coordinator</div>
+            <div class="dc-map-branches" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="dc-map-nodes">
+              <div class="dc-map-node" data-node-id="1"><span class="dc-node-indicator"></span>Node 1 <small>Cache + log</small></div>
+              <div class="dc-map-node" data-node-id="2"><span class="dc-node-indicator"></span>Node 2 <small>Cache + log</small></div>
+              <div class="dc-map-node" data-node-id="3"><span class="dc-node-indicator"></span>Node 3 <small>Cache + log</small></div>
+            </div>
+          </div>
+          <div class="dc-map-caption">The coordinator routes each key; only its selected node stores the value.</div>
+        </div>
+      </div>
+      <div class="dc-home-lower">
+        <div><span class="dc-step-number">01</span><div><strong>Store a value</strong><p>Run PUT with the sample key.</p></div></div>
+        <div><span class="dc-step-number">02</span><div><strong>Read it back</strong><p>GET finds it on the same node.</p></div></div>
+        <div><span class="dc-step-number">03</span><div><strong>Watch it disappear</strong><p>DELETE, then GET to see a miss.</p></div></div>
+      </div>
+    </section>
+
+    <section class="dc-page" id="productPlayground" aria-labelledby="playgroundTitle" hidden>
+      <div class="dc-page-heading">
+        <div><span class="dc-eyebrow">PLAYGROUND <span class="dc-muted-separator">/</span> <span id="demoModeLabel">SIMULATED</span></span><h1 id="playgroundTitle">Try a request</h1>
+          <p>Store the sample value, read it, delete it, then read once more.</p></div>
+        <a class="dc-back-link" href="/how-it-works" data-route-link>How it works <span aria-hidden="true">→</span></a>
+      </div>
+      <aside class="dc-first-run" id="firstRunGuide" aria-label="First run guide">
+        <div><span class="dc-guide-kicker">QUICK START · <span id="demoSequenceProgress">0 / 4 complete</span></span><strong>Run PUT → GET → DELETE → GET</strong><p>Keep the sample key and value, then run each operation in order.</p></div>
+        <button class="dc-dismiss" id="dismissGuideBtn" type="button" aria-label="Dismiss quick start guide">×</button>
+      </aside>
+      <section class="dc-tour" id="interactiveTour" aria-labelledby="tourTitle" aria-live="polite" hidden>
+        <div class="dc-tour-copy">
+          <span class="dc-eyebrow" id="tourProgress">GUIDED TOUR · STEP 1 OF 4</span>
+          <h2 id="tourTitle">Store a sample value</h2>
+          <p id="tourInstruction"></p>
+          <p class="dc-tour-expectation"><strong>Expected:</strong> <span id="tourExpected"></span></p>
+          <p class="dc-tour-observation"><strong>Observed:</strong> <span id="tourObserved">No request has run for this step yet.</span></p>
+        </div>
+        <div class="dc-tour-actions">
+          <button class="dc-button dc-button-quiet" id="tourPreviousBtn" type="button">Previous</button>
+          <button class="dc-button dc-button-primary" id="tourRunStepBtn" type="button">Run PUT</button>
+          <button class="dc-button dc-button-secondary" id="tourNextBtn" type="button" disabled>Next</button>
+          <button class="dc-button dc-button-quiet" id="tourSkipBtn" type="button">Skip</button>
+          <button class="dc-button dc-button-quiet" id="tourFinishBtn" type="button">Finish</button>
+        </div>
+      </section>
+      <div class="dc-playground-grid">
+        <section class="dc-card dc-request-card" aria-label="Request controls">
+          <div class="dc-card-heading"><div><span class="dc-eyebrow">REQUEST</span><h2>Choose an operation</h2></div><span class="dc-mode-pill" id="demoModePill">SIMULATED</span></div>
+          <div class="dc-fields">
+            <label for="demoKey">Key</label><input id="demoKey" class="dc-input dc-mono" type="text" value="session:4092" autocomplete="off" spellcheck="false" />
+            <label for="demoValue">Value</label><input id="demoValue" class="dc-input dc-mono" type="text" value="user=8810" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="dc-operation-picker" role="group" aria-label="Operation">
+            <button type="button" class="dc-operation active" data-demo-op="PUT" aria-pressed="true">PUT</button>
+            <button type="button" class="dc-operation" data-demo-op="GET" aria-pressed="false">GET</button>
+            <button type="button" class="dc-operation" data-demo-op="DELETE" aria-pressed="false">DELETE</button>
+          </div>
+          <p class="dc-control-help" id="operationHelp">PUT stores or replaces this value on the key's assigned node. Requires a key and value.</p>
+          <div class="dc-actions">
+            <button class="dc-button dc-button-primary" id="demoRunBtn" type="button">Run PUT <span aria-hidden="true">→</span></button>
+            <button class="dc-button dc-button-secondary" id="demoStepBtn" type="button">Step forward</button>
+            <button class="dc-button dc-button-quiet" id="demoResetBtn" type="button">Reset</button>
+          </div>
+          <p class="dc-reset-note">Reset clears this simulated run. Live cache data is never cleared here.</p>
+        </section>
+        <section class="dc-card dc-result-card" aria-live="polite" aria-atomic="false" aria-label="Request result">
+          <div class="dc-card-heading"><div><span class="dc-eyebrow">RESULT</span><h2 id="demoResultTitle">Ready when you are</h2></div><span class="dc-result-indicator" id="demoResultIndicator">READY</span></div>
+          <p id="demoResultMessage" class="dc-result-message">Run PUT to store <code>session:4092</code> on its assigned node.</p>
+          <div class="dc-result-details">
+            <div><span>Operation</span><strong id="demoResultOperation">—</strong></div>
+            <div><span>Key</span><strong id="demoResultKey" class="dc-mono">session:4092</strong></div>
+            <div><span>Destination</span><strong id="demoResultNode">—</strong></div>
+            <div><span>Cache / log</span><strong id="demoResultChange">No changes yet</strong></div>
+          </div>
+          <div class="dc-stage"><div class="dc-stage-top"><span>Stage <strong id="demoStageCount">Ready</strong></span><span id="demoStageLabel">Ready</span></div><div class="dc-stage-track" id="demoStageTrack" role="img" aria-label="Request path stages"><i></i><i></i><i></i><i></i></div></div>
+          <details class="dc-inspector"><summary>Technical details</summary><pre id="demoPacketInspector">No request has been sent.</pre></details>
+        </section>
+      </div>
+      <section class="dc-card dc-cluster-card" aria-label="Cache nodes and recent events">
+        <div class="dc-card-heading"><div><span class="dc-eyebrow">LIVE VIEW</span><h2>What changed</h2></div><span class="dc-subtle" id="demoDataSource">Browser simulation</span></div>
+        <div class="dc-live-map" id="demoSystemMap" aria-label="Active request route and three data nodes">
+          <div class="dc-map-coordinator">Coordinator</div><div class="dc-map-branches" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="dc-live-nodes">
+            <article class="dc-live-node" data-node-id="1"><div><span class="dc-node-indicator"></span><strong>Data node 1</strong><span class="dc-live-node-meta" id="demoNodeMeta1"></span></div><div class="dc-cache-preview" id="demoNodeCache1">Empty cache</div></article>
+            <article class="dc-live-node" data-node-id="2"><div><span class="dc-node-indicator"></span><strong>Data node 2</strong><span class="dc-live-node-meta" id="demoNodeMeta2"></span></div><div class="dc-cache-preview" id="demoNodeCache2">Empty cache</div></article>
+            <article class="dc-live-node" data-node-id="3"><div><span class="dc-node-indicator"></span><strong>Data node 3</strong><span class="dc-live-node-meta" id="demoNodeMeta3"></span></div><div class="dc-cache-preview" id="demoNodeCache3">Empty cache</div></article>
+          </div>
+        </div>
+        <div class="dc-events-heading"><strong>Recent requests</strong><span>Newest first</span></div>
+        <ol class="dc-event-list" id="demoEventList"><li class="dc-event-empty">Your request results will appear here.</li></ol>
+      </section>
+    </section>
+
+    <section class="dc-page" id="productHow" aria-labelledby="howTitle" hidden>
+      <div class="dc-page-heading"><div><span class="dc-eyebrow">HOW IT WORKS</span><h1 id="howTitle">A small system, made visible</h1><p>One coordinator finds the node for a key. That node handles the cache request.</p></div><a class="dc-back-link" href="/playground" data-route-link>Try a request <span aria-hidden="true">→</span></a></div>
+      <div class="dc-card dc-architecture-card">
+        <div class="dc-card-heading"><div><span class="dc-eyebrow">ARCHITECTURE</span><h2>One route, one owner</h2></div><span class="dc-subtle">Coordinator → selected node</span></div>
+        <div class="dc-architecture-map">
+          <div class="dc-architecture-coordinator"><span class="dc-node-indicator"></span><div><strong>Coordinator</strong><small>Routes by key</small></div></div>
+          <div class="dc-architecture-lines" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="dc-architecture-nodes">
+            <div class="dc-architecture-node" data-node-id="1"><strong>Data node 1</strong><small>LRU cache · local WAL</small></div>
+            <div class="dc-architecture-node" data-node-id="2"><strong>Data node 2</strong><small>LRU cache · local WAL</small></div>
+            <div class="dc-architecture-node" data-node-id="3"><strong>Data node 3</strong><small>LRU cache · local WAL</small></div>
+          </div>
+        </div>
+      </div>
+      <div class="dc-concept-grid">
+        <article class="dc-concept"><span class="dc-concept-number">01</span><h2>Request routing</h2><p>A consistent hash ring assigns each key to the next virtual node clockwise.</p></article>
+        <article class="dc-concept"><span class="dc-concept-number">02</span><h2>In-memory caching</h2><p>Each data node keeps recently used values first and removes the least recently used when full.</p></article>
+        <article class="dc-concept"><span class="dc-concept-number">03</span><h2>Recovery</h2><p>A node replays its local write-ahead log to rebuild volatile cache memory.</p></article>
+      </div>
+      <section class="dc-card dc-learning-card" aria-labelledby="learningTitle">
+        <div class="dc-card-heading"><div><span class="dc-eyebrow">INTERACTIVE EXPLANATION</span><h2 id="learningTitle">Play a system walkthrough</h2></div><span class="dc-mode-pill" id="learningSource">SIMULATION</span></div>
+        <div class="dc-learning-tabs" role="group" aria-label="Choose an explanation">
+          <button type="button" data-learning-mode="route" aria-pressed="true">Request route</button>
+          <button type="button" data-learning-mode="lru" aria-pressed="false">LRU cache</button>
+          <button type="button" data-learning-mode="wal" aria-pressed="false">WAL & recovery</button>
+        </div>
+        <div class="dc-learning-scene" id="learningScene" aria-live="polite">
+          <div class="dc-learning-step" data-learning-role="client"><strong>Client</strong><span>Request</span></div>
+          <span class="dc-learning-arrow" data-learning-link="0" aria-hidden="true">→</span>
+          <div class="dc-learning-step" data-learning-role="coordinator"><strong>Coordinator</strong><span>Routes by key</span></div>
+          <span class="dc-learning-arrow" data-learning-link="1" aria-hidden="true">→</span>
+          <div class="dc-learning-step" data-learning-role="ring"><strong>Hash ring</strong><span>Clockwise successor</span></div>
+          <span class="dc-learning-arrow" data-learning-link="2" aria-hidden="true">→</span>
+          <div class="dc-learning-step" data-learning-role="node"><strong id="learningNodeLabel">Data node</strong><span id="learningNodeDetail">Cache + local log</span></div>
+        </div>
+        <p class="dc-learning-caption" id="learningCaption"></p>
+        <div class="dc-learning-state" id="learningState"></div>
+        <div class="dc-learning-controls">
+          <span id="learningProgress" aria-live="polite">Ready</span>
+          <div class="dc-actions">
+            <button class="dc-button dc-button-primary" id="learningRunBtn" type="button">Run</button>
+            <button class="dc-button dc-button-secondary" id="learningStepBtn" type="button">Step</button>
+            <button class="dc-button dc-button-quiet" id="learningPauseBtn" type="button" disabled>Pause</button>
+            <button class="dc-button dc-button-quiet" id="learningResetBtn" type="button">Reset</button>
+          </div>
+        </div>
+        <div class="dc-learning-recovery" id="learningRecoveryControls" hidden>
+          <p class="dc-note">Demo only: this clears simulated cache memory, keeps its log, and replays that log. It does not stop a C++ process or prove disk durability.</p>
+          <button type="button" class="dc-button dc-button-secondary" id="simulateCrashBtn">Simulate cache loss</button>
+          <button type="button" class="dc-button dc-button-secondary" id="simulateRecoveryBtn">Replay local log</button>
+          <span id="learningRecoveryStatus" aria-live="polite">No simulated crash.</span>
+        </div>
+      </section>
+      <div class="dc-detail-grid">
+        <details class="dc-card dc-detail-card" open>
+          <summary><span><span class="dc-eyebrow">CONSISTENT HASHING</span><strong>Why this node?</strong></span><span class="dc-detail-chevron" aria-hidden="true">+</span></summary>
+          <p id="howRouteSummary">Enter a key in the playground to see its destination node.</p>
+          <svg id="productHashRing" viewBox="0 0 240 160" role="img" aria-label="Hash ring showing the selected key and its clockwise successor"></svg>
+          <details class="dc-nested-detail"><summary>Show hash values</summary><p id="howHashValues" class="dc-mono">No key selected.</p></details>
+        </details>
+        <details class="dc-card dc-detail-card">
+          <summary><span><span class="dc-eyebrow">LRU CACHE</span><strong>Most recent → least recent</strong></span><span class="dc-detail-chevron" aria-hidden="true">+</span></summary>
+          <p>A successful GET promotes its key. Only a new PUT at capacity evicts the tail.</p>
+          <ol class="dc-lru-list" id="howLruList"><li>Cache entries appear after a PUT.</li></ol>
+        </details>
+        <details class="dc-card dc-detail-card">
+          <summary><span><span class="dc-eyebrow">WRITE-AHEAD LOG</span><strong>Log first, then memory</strong></span><span class="dc-detail-chevron" aria-hidden="true">+</span></summary>
+          <p>The C++ node appends and flushes a stream record before changing cache memory. Stream flush is not an <code>fsync</code> power-loss guarantee.</p>
+          <div class="dc-wal-states"><div><span>VOLATILE MEMORY</span><strong id="howWalMemory">Empty</strong></div><span aria-hidden="true">↔</span><div><span>LOCAL LOG</span><strong id="howWalLog">No records</strong></div></div>
+          <ol class="dc-wal-list" id="howWalList"><li>Mutations appear here after a PUT or DELETE.</li></ol>
+          <p class="dc-note">See the interactive walkthrough above to simulate cache-memory loss and replay the local log.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="dc-page" id="productPerformance" aria-labelledby="performanceTitle" hidden>
+      <div class="dc-page-heading"><div><span class="dc-eyebrow">PERFORMANCE</span><h1 id="performanceTitle">Measure the cache</h1><p>Run the Python load tester against the live C++ cluster, or inspect clearly labeled sample data.</p></div><span class="dc-mode-pill" id="performanceModePill">NO RUN YET</span></div>
+      <section class="dc-card dc-benchmark-card">
+        <div class="dc-benchmark-controls">
+          <label>Target<select class="dc-input" id="productBenchmarkTarget"><option value="coordinator">Coordinator</option><option value="node_1">Data node 1</option><option value="node_2">Data node 2</option><option value="node_3">Data node 3</option></select></label>
+          <label>GET %<input class="dc-input" id="productGetPct" type="number" min="0" max="100" value="70" /></label>
+          <label>PUT %<input class="dc-input" id="productPutPct" type="number" min="0" max="100" value="20" /></label>
+          <label>DELETE %<input class="dc-input" id="productDelPct" type="number" min="0" max="100" value="10" /></label>
+          <label>Workers<input class="dc-input" id="productWorkers" type="number" min="1" max="200" value="50" /></label>
+          <label>Requests<input class="dc-input" id="productRequests" type="number" min="100" max="20000" step="100" value="2500" /></label>
+        </div>
+        <div class="dc-benchmark-actions">
+          <button class="dc-button dc-button-primary" id="productRunLiveBtn" type="button" disabled title="Connect the coordinator and all three C++ data nodes to enable live benchmarks">Run live benchmark · unavailable</button>
+          <button class="dc-button dc-button-secondary" id="productLoadSavedBtn" type="button">Load saved measurement</button>
+          <button class="dc-button dc-button-secondary" id="productSampleBtn" type="button">Generate sample data</button>
+          <label class="dc-button dc-button-quiet dc-file-label" for="productImportReport">Import JSON<input id="productImportReport" type="file" accept=".json,application/json" /></label>
+        </div>
+        <p class="dc-benchmark-note" id="productBenchmarkNotice">No benchmark run is loaded. Sample data is simulated; a saved measurement is historical, not a live reading.</p>
+        <div class="dc-error" id="productBenchmarkError" role="alert" hidden></div>
+      </section>
+      <section class="dc-card dc-benchmark-results" id="productBenchmarkResults" hidden aria-label="Benchmark results">
+        <div class="dc-card-heading"><div><span class="dc-eyebrow">RESULTS</span><h2 id="productBenchmarkTitle">Benchmark result</h2></div><span class="dc-mode-pill" id="productBenchmarkSource">—</span></div>
+        <div class="dc-metric-grid">
+          <div><span>Throughput</span><strong id="productThroughput">—</strong><small>operations / second</small></div>
+          <div><span>P50 latency</span><strong id="productP50">—</strong><small>milliseconds</small></div>
+          <div><span>P99 latency</span><strong id="productP99">—</strong><small>milliseconds</small></div>
+          <div><span>Failures</span><strong id="productFailures">—</strong><small id="productFailureNote">—</small></div>
+        </div>
+        <div class="dc-chart-heading"><span>Throughput by interval</span><small>ops / second · ten equal-time buckets</small></div>
+        <svg class="dc-benchmark-chart" id="productBenchmarkChart" viewBox="0 0 640 220" role="img" aria-label="Benchmark throughput chart"></svg>
+      </section>
+    </section>
+
+    <section class="dc-page dc-user-guide" id="productGuide" aria-labelledby="guideTitle" hidden>
+      <div class="dc-page-heading">
+        <div><span class="dc-eyebrow">USER GUIDE</span><h1 id="guideTitle">A quick guide to DisCache</h1><p>Learn the demo in a few steps, then explore the system at your own pace.</p></div>
+        <button class="dc-button dc-button-secondary" id="printGuideBtn" type="button">Print / Save as PDF</button>
+      </div>
+      <section class="dc-guide-start dc-card" aria-labelledby="guideStartTitle">
+        <div><span class="dc-eyebrow">GETTING STARTED</span><h2 id="guideStartTitle">Try the four-request example</h2><p>Use the browser simulation to store, read, and remove <code>session:4092</code> → <code>user=8810</code>. No cluster setup is needed.</p></div>
+        <div class="dc-guide-actions"><a class="dc-button dc-button-primary" href="/playground" data-route-link>Open Playground</a><button class="dc-button dc-button-secondary" id="startTourBtn" type="button">Start interactive tour</button></div>
+      </section>
+      <div class="dc-guide-grid">
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">01</span><h2>What DisCache does</h2>
+          <p>DisCache is a small distributed in-memory cache. It keeps frequently used key-value data across three data nodes and routes each key to one owner.</p>
+          <div class="dc-guide-diagram" aria-label="Client to coordinator to one of three data nodes">
+            <span>Your app</span><b aria-hidden="true">→</b><span>Coordinator</span><b aria-hidden="true">→</b><span>One of 3 data nodes</span>
+          </div>
+          <p>The coordinator routes requests; data nodes store values. The website's default playground is a browser simulation, not a live cluster.</p>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">02</span><h2>Navigate and run a request</h2>
+          <p><strong>Playground</strong> runs requests. <strong>How it works</strong> explains routing, cache order and recovery. <strong>Performance</strong> shows benchmark data.</p>
+          <ol><li>Keep the sample key and value, or enter your own.</li><li>Choose PUT, GET or DELETE; the hint beside the controls explains it.</li><li>Press Run, or Step to reveal the request path.</li></ol>
+          <details class="dc-guide-advanced"><summary>What do the buttons do?</summary><p>Run plays the request path. Step Forward reveals one stage at a time. Reset clears the browser simulation and its sample log; it never clears live backend data.</p></details>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">03</span><h2>PUT, GET and DELETE</h2>
+          <ul class="dc-guide-operations">
+            <li><strong>PUT</strong><span>Store or replace a value. Requires a key and a value. Expect “Value stored”.</span></li>
+            <li><strong>GET</strong><span>Look up a key. A hit returns its value; a miss says “Key not found”.</span></li>
+            <li><strong>DELETE</strong><span>Remove a key. It reports “Key deleted” or “Key not found”.</span></li>
+          </ul>
+          <p>A destination node identifies where the request was routed. “Cache / log” summarizes actual changes, and Recent requests shows prior results.</p>
+          <details class="dc-guide-advanced"><summary>Technical response status</summary><p><code>OK</code> means the operation succeeded; <code>NOT_FOUND</code> is a cache miss or missing delete target; <code>ERROR</code> means the request failed. Detailed response fields are in the Playground's Technical details panel.</p></details>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">04</span><h2>Coordinator and data nodes</h2>
+          <p>The coordinator receives a request and forwards it to the chosen node. Each of the three independent data nodes owns its own cache and local write-ahead log (WAL: a record of changes).</p>
+          <p>There is no replication or automatic failover. A node's cached value is not copied to the other two nodes.</p>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">05</span><h2>How routing chooses a node</h2>
+          <p>Consistent hashing places each key and many virtual node positions on a circular hash ring. The coordinator selects the first virtual position clockwise from the key; its owner is the destination data node.</p>
+          <p>This gives the same key the same route while the ring stays unchanged. The interactive ring shows the real key hash, successor and node for the current sample.</p>
+          <details class="dc-guide-advanced"><summary>More about the calculation</summary><p>The current implementation uses MurmurHash3 x86-32 with seed 0 and 100 virtual positions per node (300 total). A lookup wraps to the ring start if the key hash is beyond the last position.</p></details>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">06</span><h2>LRU cache and eviction</h2>
+          <p>LRU means “least recently used.” Entries are ordered from most recently used (MRU) to least recently used. A successful GET promotes its entry to the front.</p>
+          <p>If a new PUT arrives when the cache is full, the least recently used entry is evicted. A cache miss does not promote anything.</p>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">07</span><h2>WAL and recovery</h2>
+          <p>For PUT and DELETE, a data node appends and flushes a WAL record before changing its in-memory cache, then responds. At startup it replays its local log to rebuild memory.</p>
+          <p>Flush is not an <code>fsync</code> guarantee against power loss. The How it works page can simulate losing browser cache memory and replaying the simulated log; it never crashes a real process.</p>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">08</span><h2>Read benchmark results</h2>
+          <p>Throughput is operations per second. P50 and P99 are latency percentiles in milliseconds: half and 99% of measured requests were at or below that time.</p>
+          <p>Check the source label: live runs require a connected C++ cluster, saved results are historical, imported JSON comes from your file, and generated samples are simulated—not measurements.</p>
+        </article>
+        <article class="dc-card dc-guide-card">
+          <span class="dc-concept-number">09</span><h2>Common issues</h2>
+          <ul>
+            <li><strong>Key required:</strong> enter a non-empty key.</li>
+            <li><strong>Key not found:</strong> run PUT first, use the same key, and check whether it was deleted or evicted.</li>
+            <li><strong>Live request unavailable:</strong> use the simulation, or start the coordinator and all three data nodes before switching to live mode.</li>
+            <li><strong>Benchmark unavailable:</strong> load the saved measurement or generate clearly labeled sample data.</li>
+            <li><strong>Unexpected route or result:</strong> reset the browser demo, check the selected operation, then inspect Technical details for the status and node.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div id="legacyWorkspace" hidden aria-hidden="true">
+    <section id="routeIntro" class="route-intro" aria-label="Page guide" hidden>
+      <div class="route-guide-grid">
+        <div><span class="guide-label">WHAT IS THIS?</span><p id="routeWhat"></p></div>
+        <div><span class="guide-label">TRY IT</span><p id="routeTry"></p></div>
+        <div class="route-outcome" aria-live="polite" aria-atomic="true">
+          <span class="guide-label">WHAT HAPPENED?</span><p id="routeOutcome">Choose an action to see its result here.</p>
+        </div>
+        <details class="route-how">
+          <summary>How it works</summary>
+          <p id="routeHow"></p>
+        </details>
+      </div>
+    </section>
+    <section id="architectureReference" class="lab-section" hidden>
+      <div class="section-title-bar">
+        <div><div class="eyebrow">SYSTEM DESIGN</div><h1 class="section-heading">Architecture and technical reference</h1></div>
+        <div class="section-meta-note">How requests move from a client to one of three independent cache nodes.</div>
+      </div>
+      <div class="panel-body-text architecture-summary">
+        <h2>One coordinator, three storage nodes</h2>
+        <p>The coordinator owns the consistent-hash ring and forwards each request to one data node. The coordinator does not store cached values; each data node owns its own in-memory LRU cache and local write-ahead log.</p>
+        <p>The custom TCP protocol uses a 10-byte request header and a 16-byte response header. The request magic is <code>0xDC</code>; GET, PUT and DELETE use opcodes <code>0x01</code>, <code>0x02</code> and <code>0x03</code>.</p>
+        <p>There is no replication or automatic failover. WAL writes use C++ stream flush, not an OS-level <code>fsync</code> guarantee.</p>
+      </div>
+      <div id="architectureDetails"></div>
+    </section>
+
     <!-- 4. OVERVIEW SECTION -->
     <section id="overview" class="lab-section">
       <div class="section-header-grid">
         <div class="col-span-8">
-          <div class="eyebrow">BTECH CSE SYSTEMS ENGINEERING LABORATORY · C++20 IMPLEMENTATION</div>
-          <h1 class="hero-title">DisCache: Inside a Distributed Cache</h1>
+          <div class="eyebrow">DISTRIBUTED IN-MEMORY CACHE · C++20</div>
+          <h1 class="hero-title">Keep hot data close. Route it with confidence.</h1>
           <p class="hero-subtitle">
-            Explore how keys are routed, cached, evicted, persisted, and benchmarked across independent data nodes.
+            DisCache spreads frequently used key-value data across independent nodes, so requests can find the right cache quickly. Explore a safe simulation first, then inspect how the C++ implementation works.
           </p>
         </div>
         <div class="col-span-4 hero-actions-box">
           <div class="objective-panel">
-            <div class="panel-label">PROJECT OBJECTIVE</div>
+            <div class="panel-label">A WORKING SYSTEM, MADE EXPLORABLE</div>
             <p class="objective-text">
-              Build and evaluate a distributed caching system from first principles without Redis, Memcached, frameworks, or external caching libraries.
+              Try a request and watch the coordinator route it, the chosen node update its cache, and the response come back.
             </p>
             <div class="hero-btn-row">
-              <a href="#architecture" id="btnExploreFlow" class="btn btn-primary">Explore Request Flow →</a>
-              <a href="#hashing" id="btnOpenRing" class="btn btn-secondary">Open Hash Ring →</a>
+              <a href="/playground" id="btnExploreFlow" class="btn btn-primary" data-route-link>Try a request <span aria-hidden="true">→</span></a>
+              <a href="/hash-ring" id="btnOpenRing" class="btn btn-secondary" data-route-link>Explore the hash ring <span aria-hidden="true">→</span></a>
             </div>
           </div>
         </div>
       </div>
 
+      <div class="first-run-guide">
+        <div><span class="guide-label">FIRST RUN</span><strong>See one key travel through the system</strong></div>
+        <p>Start with PUT to store a sample value, run GET to retrieve it, then DELETE and GET again to see a cache miss.</p>
+        <a href="/playground" class="text-link" data-route-link>Open request playground <span aria-hidden="true">↗</span></a>
+      </div>
+
       <!-- Three Primary Architecture Facts -->
       <div class="facts-grid">
         <div class="fact-card">
-          <div class="fact-meta">ROUTING TIER · PORT 8000</div>
+          <div class="fact-meta">REQUEST ROUTING · PORT 8000</div>
           <div class="fact-value">1 Coordinator</div>
           <p class="fact-desc">
             Stateless C++20 TCP process on <code>127.0.0.1:8000</code>. Computes <code>MurmurHash3_x86_32</code> and performs <code>std::map::lower_bound</code> clockwise successor lookup to forward binary frames over raw TCP.
           </p>
         </div>
         <div class="fact-card">
-          <div class="fact-meta">STORAGE TIER · PORTS 8001–8003</div>
+          <div class="fact-meta">CACHE NODES · PORTS 8001–8003</div>
           <div class="fact-value">3 Independent Data Nodes</div>
           <p class="fact-desc">
             Three isolated OS processes listening on ports <code>8001</code>, <code>8002</code>, and <code>8003</code>. Each node manages its own in-memory LRU cache, bounded worker pool, and local disk Write-Ahead Log. No cross-node replication.
           </p>
         </div>
         <div class="fact-card">
-          <div class="fact-meta">RING GRANULARITY · 300 TOTAL POSITIONS</div>
+          <div class="fact-meta">KEY PLACEMENT · 300 VIRTUAL POSITIONS</div>
           <div class="fact-value">100 Virtual Nodes per Data Node</div>
           <p class="fact-desc">
             Each physical Data Node is mapped to 100 virtual positions on the 32-bit unsigned hash ring <code>[0, 2^32 - 1]</code>, interleaving node ownership for finer-grained keyspace partitioning.
@@ -90,7 +416,7 @@
       <div class="panel overview-preview-panel">
         <div class="panel-header">
           <div>
-            <span class="panel-index">FIG 1.0</span>
+            <span class="panel-index">SYSTEM MAP</span>
             <strong class="panel-title">System Topology &amp; Process Boundary Preview</strong>
           </div>
           <span class="panel-annotation">4 Independent C++20 Processes on localhost · Custom Binary Protocol (0xDC) over Raw TCP</span>
@@ -163,7 +489,7 @@
     <section id="architecture" class="lab-section">
       <div class="section-title-bar">
         <div>
-          <div class="eyebrow">SECTION 01 · END-TO-END REQUEST PIPELINE</div>
+          <div class="eyebrow">REQUEST PLAYGROUND</div>
           <h2 class="section-heading">Interactive Distributed Architecture Workspace</h2>
         </div>
         <div class="section-meta-note">
@@ -190,7 +516,7 @@
 
           <div class="control-group control-val" id="archValGroup">
             <label class="control-label" for="archValInput">VALUE INPUT <span id="archValHint">(PUT ONLY)</span></label>
-            <input type="text" id="archValInput" class="lab-input mono" value="uid=8810;role=admin" placeholder="Value payload" autocomplete="off" spellcheck="false" />
+            <input type="text" id="archValInput" class="lab-input mono" value="user=8810" placeholder="Value payload" autocomplete="off" spellcheck="false" />
           </div>
 
           <div class="control-group control-presets">
@@ -218,7 +544,7 @@
       <div class="panel arch-workspace-panel">
         <div class="panel-header">
           <div>
-            <span class="panel-index">FIG 1.1</span>
+            <span class="panel-index">REQUEST FLOW</span>
             <strong class="panel-title">Left-to-Right Distributed Request &amp; Mutation Flow</strong>
           </div>
           <div class="stage-progress-indicator">
@@ -233,8 +559,8 @@
           <!-- Stage 1 -->
           <div class="pipe-box" id="pipeStage1" data-stage="1">
             <div class="pipe-step-num">STAGE 01</div>
-            <div class="pipe-title">Python Load Tester</div>
-            <div class="pipe-sub">Client Socket</div>
+            <div class="pipe-title">Browser Playground</div>
+            <div class="pipe-sub">Request via bridge</div>
             <div class="pipe-code" id="pipeClientInfo">Op: PUT session:4092</div>
           </div>
 
@@ -281,7 +607,7 @@
           </div>
 
           <div class="pipe-connector" id="pipeConn4">
-            <span class="conn-label" id="pipeCacheOrderLabel">O(1) Lookup / Update</span>
+            <span class="conn-label" id="pipeCacheOrderLabel">Avg O(1) map + O(1) list</span>
             <div class="conn-line"><span class="packet-marker" id="pktMarker4"></span></div>
             <span class="conn-sub">std::shared_mutex</span>
           </div>
@@ -304,7 +630,7 @@
           <div class="pipe-box" id="pipeStage6" data-stage="6">
             <div class="pipe-step-num">STAGE 06</div>
             <div class="pipe-title">Per-Node WAL</div>
-            <div class="pipe-sub" id="pipeWalFileSub">node_X.log (Durable)</div>
+            <div class="pipe-sub" id="pipeWalFileSub">node_X.log (stream flushed)</div>
             <div class="pipe-code" id="pipeWALInfo">Write-Ahead Log</div>
           </div>
         </div>
@@ -436,7 +762,7 @@
               <span><strong>OP:</strong> 0x02 (PUT)</span>
               <span><strong>KEY_LEN:</strong> 12B</span>
               <span><strong>VAL_LEN:</strong> 19B</span>
-              <span><strong>PAYLOAD:</strong> "session:4092" | "uid=8810;role=admin"</span>
+              <span><strong>PAYLOAD:</strong> "session:4092" | "user=8810"</span>
             </div>
           </div>
           <div class="packet-half">
@@ -456,7 +782,7 @@
       <div class="panel event-log-panel">
         <div class="panel-header">
           <div>
-            <span class="panel-index">LOG 1.2</span>
+            <span class="panel-index">REQUEST LOG</span>
             <strong class="panel-title">Step-by-Step Request Execution Event Log</strong>
           </div>
           <button type="button" id="clearArchLogBtn" class="btn btn-xs">Clear Log</button>
@@ -485,7 +811,7 @@
     <section id="hashing" class="lab-section">
       <div class="section-title-bar">
         <div>
-          <div class="eyebrow">SECTION 02 · DETERMINISTIC KEY ROUTING</div>
+          <div class="eyebrow">HASH RING</div>
           <h2 class="section-heading">Consistent Hashing &amp; Virtual Node Ring Visualizer</h2>
         </div>
         <div class="section-meta-note">
@@ -498,7 +824,7 @@
         <div class="col-span-7 panel">
           <div class="panel-header">
             <div>
-              <span class="panel-index">FIG 2.1</span>
+              <span class="panel-index">HASH RING</span>
               <strong class="panel-title">32-Bit Hash Space Ring <code>[0, 2^32 - 1]</code> (300 Virtual Positions)</strong>
             </div>
             <span class="panel-annotation">Deterministic MurmurHash3_x86_32 (Seed = 0)</span>
@@ -518,7 +844,7 @@
               <button type="button" class="btn btn-xs ring-preset-btn" data-key="order:8821">order:8821</button>
               <button type="button" class="btn btn-xs ring-preset-btn" data-key="cache:block:7">cache:block:7</button>
               <button type="button" class="btn btn-xs ring-preset-btn" data-key="metric:cpu:0">metric:cpu:0</button>
-              <button type="button" id="ringExecuteInArchBtn" class="btn btn-xs">Trace Key in Architecture ↑</button>
+              <button type="button" id="ringExecuteInArchBtn" class="btn btn-xs">Trace this key in Playground →</button>
             </div>
           </div>
 
@@ -553,7 +879,7 @@
           <div class="panel">
             <div class="panel-header">
               <div>
-                <span class="panel-index">ALG 2.2</span>
+                <span class="panel-index">ROUTING STEPS</span>
                 <strong class="panel-title">5-Step Consistent Hashing Routing Algorithm</strong>
               </div>
             </div>
@@ -584,7 +910,7 @@
           <div class="panel">
             <div class="panel-header">
               <div>
-                <span class="panel-index">NOTE 2.3</span>
+                <span class="panel-index">DESIGN NOTE</span>
                 <strong class="panel-title">Why 100 Virtual Nodes per Physical Node?</strong>
               </div>
             </div>
@@ -624,7 +950,7 @@
     <section id="cache-engine" class="lab-section">
       <div class="section-title-bar">
         <div>
-          <div class="eyebrow">SECTION 03 · O(1) IN-MEMORY DATA STRUCTURES &amp; CONCURRENCY</div>
+          <div class="eyebrow">CACHE ENGINE &amp; CONCURRENCY</div>
           <h2 class="section-heading">LRU Cache Engine &amp; Socket Concurrency Visualizer</h2>
         </div>
         <div class="section-meta-note">
@@ -707,7 +1033,7 @@
         <div class="metric-tile">
           <div class="metric-label">HITS / MISSES / EVICTIONS</div>
           <div class="metric-val mono" id="lruMetricCounters">0 / 0 / 0</div>
-          <div class="metric-sub">All operations O(1) time</div>
+          <div class="metric-sub">Map: average O(1) · list splice: O(1)</div>
         </div>
       </div>
 
@@ -717,7 +1043,7 @@
           <div class="panel">
             <div class="panel-header">
               <div>
-                <span class="panel-index">FIG 3.1</span>
+                <span class="panel-index">LRU ORDER</span>
                 <strong class="panel-title">Custom Doubly Linked List (Recency Order: MRU Head ↔ LRU Tail)</strong>
               </div>
               <span class="panel-annotation" id="lruLastOpBanner">O(1) Pointer Splice on GET / PUT / DELETE</span>
@@ -730,7 +1056,7 @@
           <div class="panel">
             <div class="panel-header">
               <div>
-                <span class="panel-index">TBL 3.2</span>
+                <span class="panel-index">HASH MAP INDEX</span>
                 <strong class="panel-title">Hash Map Index (<code>std::unordered_map&lt;std::string, Node*&gt;</code>)</strong>
               </div>
               <span class="panel-annotation">Maps keys to Doubly Linked List Node pointers in O(1) average time</span>
@@ -759,25 +1085,25 @@
           <div class="panel">
             <div class="panel-header">
               <div>
-                <span class="panel-index">DOC 3.3</span>
-                <strong class="panel-title">O(1) LRU Cache Mechanics</strong>
+                <span class="panel-index">CACHE MECHANICS</span>
+                <strong class="panel-title">LRU Cache Mechanics</strong>
               </div>
             </div>
             <ul class="mechanics-list">
               <li>
-                <strong>Hash Map Lookup (O(1)):</strong> <code>std::unordered_map</code> maps each key string directly to its <code>Node*</code> address inside the doubly linked list, avoiding linear scans.
+                <strong>Hash Map Lookup (average-case O(1)):</strong> <code>std::unordered_map</code> maps each key string to its <code>Node*</code> address inside the doubly linked list. Hash collisions can make lookup slower in the worst case.
               </li>
               <li>
                 <strong>Recency Tracking (O(1)):</strong> A custom doubly linked list maintains recency order. The <strong>HEAD</strong> pointer tracks the Most Recently Used (MRU) entry; the <strong>TAIL</strong> pointer tracks the Least Recently Used (LRU) entry.
               </li>
               <li>
-                <strong>GET &amp; PUT Promotion (O(1)):</strong> Successful <code>GET</code> and <code>PUT</code> operations detach the target <code>Node*</code> via its <code>prev</code> and <code>next</code> pointers and attach it at <code>HEAD</code>.
+                <strong>GET &amp; PUT Promotion (O(1) list work):</strong> Successful <code>GET</code> and <code>PUT</code> operations detach the target <code>Node*</code> via its <code>prev</code> and <code>next</code> pointers and attach it at <code>HEAD</code>. The cache protects a successful GET with an exclusive lock because recency changes.
               </li>
               <li>
-                <strong>DELETE Removal (O(1)):</strong> <code>DELETE</code> detaches the node from its neighbors and erases the key from <code>std::unordered_map</code>.
+                <strong>DELETE Removal:</strong> <code>DELETE</code> unlinks the list node in O(1); <code>std::unordered_map</code> erase is average-case O(1).
               </li>
               <li>
-                <strong>Capacity Eviction (O(1)):</strong> When <code>size == capacity</code> (100,000 by default, configurable above for experiments), inserting a new key unlinks <code>TAIL</code> (the LRU entry) before inserting the new node at <code>HEAD</code>.
+                <strong>Capacity Eviction:</strong> When <code>size == capacity</code> (100,000 by default, configurable above for experiments), the node unlinks <code>TAIL</code> in O(1) list work. Map removal is average-case O(1).
               </li>
               <li>
                 <strong>Strict Scope:</strong> No TTL, no EXPIRE timers, no transactions, and no alternative eviction policies are introduced.
@@ -791,7 +1117,7 @@
       <div class="panel concurrency-panel">
         <div class="panel-header">
           <div>
-            <span class="panel-index">FIG 3.4</span>
+            <span class="panel-index">CONCURRENCY</span>
             <strong class="panel-title">Data Node Concurrency &amp; Networking Pipeline</strong>
           </div>
           <div class="concurrency-controls">
@@ -846,13 +1172,13 @@
           <div class="sync-card" id="syncReadCard">
             <strong>READ REQUESTS (<code>GET</code>) &amp; <code>std::shared_mutex</code></strong>
             <p>
-              <code>std::shared_mutex</code> supports shared reader locks (<code>std::shared_lock</code>) for read-only state inspection and exclusive locks (<code>std::unique_lock</code>) whenever the doubly linked list recency pointers (<code>head_</code>, <code>tail_</code>, <code>prev</code>, <code>next</code>) are mutated to promote a hit entry to MRU. Operations do <strong>not</strong> execute unsynchronized in parallel.
+              A successful cache <code>GET</code> takes an exclusive lock (<code>std::unique_lock</code>) because promotion changes the doubly linked list. Read-only snapshots can use shared locks; operations do <strong>not</strong> execute unsynchronized in parallel.
             </p>
           </div>
           <div class="sync-card" id="syncWriteCard">
             <strong>MUTATION REQUESTS (<code>PUT</code> / <code>DELETE</code>)</strong>
             <p>
-              Mutations serialize through the node's Write-Ahead Log mutex (append + durable disk flush) and acquire an exclusive lock (<code>std::unique_lock&lt;std::shared_mutex&gt;</code>) on the <code>LRUCache</code> before modifying hash-map entries and linked-list pointers.
+              Mutations append to the node's Write-Ahead Log and call C++ stream <code>flush()</code>, then acquire an exclusive lock (<code>std::unique_lock&lt;std::shared_mutex&gt;</code>) on the <code>LRUCache</code>. The implementation does not call OS-level <code>fsync()</code>.
             </p>
           </div>
         </div>
@@ -863,7 +1189,7 @@
     <section id="wal-recovery" class="lab-section">
       <div class="section-title-bar">
         <div>
-          <div class="eyebrow">SECTION 04 · DURABILITY &amp; CRASH RECOVERY</div>
+          <div class="eyebrow">WAL &amp; RECOVERY</div>
           <h2 class="section-heading">Write-Ahead Log (WAL) &amp; Crash-Recovery Visualizer</h2>
         </div>
         <div class="section-meta-note">
@@ -875,8 +1201,8 @@
       <div class="panel wal-workflow-panel">
         <div class="panel-header">
           <div>
-            <span class="panel-index">FIG 4.1</span>
-            <strong class="panel-title">Durable Mutation Workflow &amp; Per-Node Log Isolation</strong>
+            <span class="panel-index">MUTATION FLOW</span>
+            <strong class="panel-title">Mutation Workflow &amp; Per-Node Log Isolation</strong>
           </div>
           <span class="panel-annotation" id="walSimNoticeBadge">VISUAL SIMULATION / LIVE NODE ADAPTER</span>
         </div>
@@ -911,8 +1237,8 @@
           <span class="mut-arrow">→</span>
           <div class="mut-step" id="mutStep3">
             <span class="mut-idx">STEP 3</span>
-            <strong>Flush Durable Record</strong>
-            <small>Stream Flush to Disk</small>
+            <strong>Flush C++ Stream</strong>
+            <small>No OS fsync call</small>
           </div>
           <span class="mut-arrow">→</span>
           <div class="mut-step" id="mutStep4">
@@ -995,10 +1321,10 @@
         <div class="col-span-6 panel">
           <div class="panel-header">
             <div>
-              <span class="panel-index">LOG 4.2</span>
+              <span class="panel-index">LOCAL WAL</span>
               <strong class="panel-title">Sequential Write-Ahead Log (<code id="walFileHeaderName">node_1.log</code>)</strong>
             </div>
-            <span class="panel-annotation">Durable Disk File · Survives Process Restart</span>
+            <span class="panel-annotation">Local log file · C++ stream flush, no fsync guarantee</span>
           </div>
           <div class="table-container">
             <table class="lab-table">
@@ -1053,8 +1379,8 @@
     <section id="performance" class="lab-section">
       <div class="section-title-bar">
         <div>
-          <div class="eyebrow">SECTION 05 · MULTI-THREADED LOAD TESTING &amp; LATENCY TELEMETRY</div>
-          <h2 class="section-heading">Performance Lab — Python Load Tester Interface</h2>
+          <div class="eyebrow">PERFORMANCE</div>
+          <h2 class="section-heading">Benchmark performance</h2>
         </div>
         <div class="section-meta-note">
           50+ Concurrent Worker Threads · Separate Views for Individual Data Node vs. Full Coordinator-Routed Cluster.
@@ -1173,7 +1499,7 @@
         <div class="col-span-6 panel">
           <div class="panel-header">
             <div>
-              <span class="panel-index">CHART 5.1</span>
+              <span class="panel-index">THROUGHPUT &amp; LATENCY</span>
               <strong class="panel-title">Throughput (ops/sec) &amp; Latency Across Execution Windows</strong>
             </div>
             <span class="panel-annotation" id="chart51SourceTag">ILLUSTRATIVE DATA</span>
@@ -1187,7 +1513,7 @@
         <div class="col-span-6 panel">
           <div class="panel-header">
             <div>
-              <span class="panel-index">CHART 5.2</span>
+              <span class="panel-index">NODE DISTRIBUTION</span>
               <strong class="panel-title">Per-Node Request Distribution &amp; Latency Percentiles</strong>
             </div>
             <span class="panel-annotation" id="chart52SourceTag">ILLUSTRATIVE DATA</span>
@@ -1202,7 +1528,7 @@
       <div class="panel">
         <div class="panel-header">
           <div>
-            <span class="panel-index">TBL 5.3</span>
+            <span class="panel-index">BENCHMARK COMPARISON</span>
             <strong class="panel-title">Benchmark Comparison: Individual Data Node vs. Full Coordinator-Routed System</strong>
           </div>
           <span class="panel-annotation">Coordinator routing adds one TCP hop + MurmurHash3 lookup; adding nodes partitions keyspace but does not automatically multiply single-coordinator throughput</span>
@@ -1235,7 +1561,7 @@
     <section id="reference-summary" class="lab-section">
       <div class="section-title-bar">
         <div>
-          <div class="eyebrow">SECTION 06 · ARCHITECTURAL SPECIFICATION MATRIX</div>
+          <div class="eyebrow">TECHNICAL REFERENCE</div>
           <h2 class="section-heading">Systems Engineering Reference &amp; Verification Guide</h2>
         </div>
         <div class="section-meta-note">
@@ -1267,7 +1593,7 @@
         <div class="ref-card">
           <div class="ref-num">05 · O(1) LRU ENGINE</div>
           <strong>How does the LRU data structure work?</strong>
-          <p>Combines <code>std::unordered_map&lt;string, Node*&gt;</code> for O(1) lookup with a custom doubly linked list where <code>HEAD</code> is MRU and <code>TAIL</code> is evicted in O(1) when capacity is reached.</p>
+          <p>Combines average-case O(1) <code>std::unordered_map&lt;string, Node*&gt;</code> lookup with O(1) doubly linked-list operations. <code>HEAD</code> is MRU; <code>TAIL</code> is the next eviction candidate.</p>
         </div>
         <div class="ref-card">
           <div class="ref-num">06 · NETWORK &amp; CONCURRENCY</div>
@@ -1277,7 +1603,7 @@
         <div class="ref-card">
           <div class="ref-num">07 · WRITE-AHEAD LOGGING</div>
           <strong>Why does a mutation enter WAL before success?</strong>
-          <p>Appending and flushing the record to <code>node_X.log</code> before updating volatile RAM guarantees that any acknowledged <code>PUT</code> or <code>DELETE</code> can be recovered after a process crash.</p>
+          <p>The guided crash is simulated in the browser. The node appends a record and calls C++ stream <code>flush()</code> before updating RAM. Replay can rebuild state when the log record is present, but there is no power-loss durability guarantee because the implementation does not call <code>fsync()</code> or <code>fdatasync()</code>.</p>
         </div>
         <div class="ref-card">
           <div class="ref-num">08 · CRASH RECOVERY</div>
@@ -1296,13 +1622,16 @@
         </div>
       </div>
     </section>
+    </div>
   </main>
 
-  <footer class="lab-footer">
-    <div class="footer-inner">
-      <div><strong>DisCache</strong> — Distributed In-Memory Caching System · BTech Computer Science &amp; Engineering Project</div>
-      <div>C++20 · Raw TCP Binary Protocol · MurmurHash3 · O(1) LRU · Per-Node WAL · Python 50-Worker Load Harness</div>
-    </div>
+  <footer class="dc-footer">
+    <a class="dc-wordmark" href="/" data-route-link>DisCache<span>.</span></a>
+    <details class="dc-about">
+      <summary>Project details</summary>
+      <p>DisCache is an independent C++20 distributed-cache systems project with a browser demo and Python load tester.</p>
+    </details>
+    <span>Built with C++20 · No external cache framework</span>
   </footer>
 
   <script src="/app.js"></script>

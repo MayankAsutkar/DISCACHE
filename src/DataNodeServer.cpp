@@ -114,7 +114,7 @@ BinaryResponse DataNodeServer::handle_request(const BinaryRequest& req) {
             break;
         }
         case OpCode::PUT: {
-            // 1. Append WAL Record + 2. Flush Durable Record BEFORE updating in-memory cache
+            // Append and flush the C++ stream before updating in-memory cache.
             if (!wal_.append_put(req.key, req.value)) {
                 res.status = StatusCode::ERROR;
                 res.payload = "WAL_WRITE_FAILED";
@@ -134,7 +134,7 @@ BinaryResponse DataNodeServer::handle_request(const BinaryRequest& req) {
             break;
         }
         case OpCode::DELETE: {
-            // 1. Append WAL Record + 2. Flush Durable Record
+            // Append and flush the C++ stream before updating in-memory cache.
             if (!wal_.append_delete(req.key)) {
                 res.status = StatusCode::ERROR;
                 res.payload = "WAL_WRITE_FAILED";

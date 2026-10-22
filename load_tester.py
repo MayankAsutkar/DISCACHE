@@ -84,6 +84,8 @@ def worker_task(
         sock.settimeout(5.0)
         sock.connect((host, port))
     except Exception:
+        if sock is not None:
+            sock.close()
         sock = None
 
     for i in range(ops_count):
@@ -126,6 +128,7 @@ def worker_task(
         except Exception:
             elapsed_us = (time.perf_counter() - t0) * 1_000_000.0
             latencies_us.append(elapsed_us)
+            timeline_samples.append((time.perf_counter(), elapsed_us))
             fail_count += 1
             if sock is not None:
                 try:

@@ -1,5 +1,5 @@
 /**
- * DisCache — Interactive Distributed Systems Lab (app.js)
+ * DisCache — Distributed Cache Demo (app.js)
  * =======================================================
  * Implements:
  * 1. Deterministic 32-bit MurmurHash3_x86_32 (byte-identical to C++20 backend)
@@ -185,7 +185,7 @@
   const hashRing = new DeterministicHashRing(100);
 
   // ==========================================================================
-  // 3. IN-MEMORY O(1) LRU CACHE + PER-NODE WAL SIMULATION ENGINE
+  // 3. IN-MEMORY MAP + DOUBLY LINKED LRU CACHE AND PER-NODE WAL SIMULATION
   // ==========================================================================
   class SimulatedDataNode {
     constructor(nodeId, port, walFile, demoCapacity = 5) {
@@ -194,8 +194,14 @@
       this.walFile = walFile;
       this.capacity = demoCapacity;
       this.defaultSystemCapacity = 100000;
-      this.entries = []; // Ordered from HEAD (MRU, index 0) to TAIL (LRU, last index)
+      this.entryMap = new Map();
+      this.head = null;
+      this.tail = null;
+      this.reportedSize = null;
+      this.reportedMruKey = null;
+      this.reportedLruKey = null;
       this.walRecords = [];
+      this.walRecordCount = 0;
       this.nextWalSeq = 1;
       this.hits = 0;
       this.misses = 0;
@@ -203,16 +209,45 @@
       this.totalReqs = 0;
     }
 
+    get entries() {
+      const entries = [];
+      for (let entry = this.head; entry; entry = entry.next) entries.push(entry);
+      return entries;
+    }
+
+    attachFront(entry) {
+      entry.prev = null;
+      entry.next = this.head;
+      if (this.head) this.head.prev = entry;
+      this.head = entry;
+      if (!this.tail) this.tail = entry;
+    }
+
+    detach(entry) {
+      if (entry.prev) entry.prev.next = entry.next;
+      else this.head = entry.next;
+      if (entry.next) entry.next.prev = entry.prev;
+      else this.tail = entry.prev;
+      entry.prev = null;
+      entry.next = null;
+    }
+
+    moveToHead(entry) {
+      if (entry !== this.head) {
+        this.detach(entry);
+        this.attachFront(entry);
+      }
+    }
+
     get(key) {
       this.totalReqs++;
-      const idx = this.entries.findIndex((e) => e.key === key);
-      if (idx === -1) {
+      const entry = this.entryMap.get(key);
+      if (!entry) {
         this.misses++;
         return { hit: false, value: null };
       }
       this.hits++;
-      const [entry] = this.entries.splice(idx, 1);
-      this.entries.unshift(entry); // Move to MRU HEAD
+      this.moveToHead(entry);
       return { hit: true, value: entry.value };
     }
 
@@ -228,32 +263,39 @@
           value,
         };
         this.walRecords.push(walRec);
+        this.walRecordCount = walRec.seq;
       }
 
-      const idx = this.entries.findIndex((e) => e.key === key);
-      if (idx !== -1) {
-        const [entry] = this.entries.splice(idx, 1);
+      const existing = this.entryMap.get(key);
+      if (existing) {
+        const entry = existing;
         entry.value = value;
-        this.entries.unshift(entry);
+        this.moveToHead(entry);
         return { updated: true, evicted: false, evictedKey: null, walRecord: walRec };
       }
 
       let evictedKey = null;
       let evictedVal = null;
-      if (this.entries.length >= this.capacity) {
-        const lru = this.entries.pop();
+      if (this.entryMap.size >= this.capacity) {
+        const lru = this.tail;
         if (lru) {
+          this.detach(lru);
+          this.entryMap.delete(lru.key);
           evictedKey = lru.key;
           evictedVal = lru.value;
           this.evictions++;
         }
       }
 
-      this.entries.unshift({
+      const entry = {
         key,
         value,
         addr: '0x' + (0x7f0010 + ((murmurhash3_x86_32(key) & 0xfff) << 4)).toString(16).toUpperCase(),
-      });
+        prev: null,
+        next: null,
+      };
+      this.attachFront(entry);
+      this.entryMap.set(key, entry);
 
       return {
         updated: false,
@@ -276,31 +318,39 @@
           value: '',
         };
         this.walRecords.push(walRec);
+        this.walRecordCount = walRec.seq;
       }
 
-      const idx = this.entries.findIndex((e) => e.key === key);
-      if (idx === -1) {
+      const entry = this.entryMap.get(key);
+      if (!entry) {
         return { removed: false, walRecord: walRec };
       }
-      this.entries.splice(idx, 1);
+      this.detach(entry);
+      this.entryMap.delete(key);
       return { removed: true, walRecord: walRec };
     }
 
     setCapacity(newCap) {
       this.capacity = Math.max(1, Number(newCap) || 5);
-      while (this.entries.length > this.capacity) {
-        this.entries.pop();
+      while (this.entryMap.size > this.capacity) {
+        const lru = this.tail;
+        if (!lru) break;
+        this.detach(lru);
+        this.entryMap.delete(lru.key);
         this.evictions++;
       }
     }
 
     clearMemoryOnly() {
-      this.entries = [];
+      this.entryMap.clear();
+      this.head = null;
+      this.tail = null;
     }
 
     clearAll() {
-      this.entries = [];
+      this.clearMemoryOnly();
       this.walRecords = [];
+      this.walRecordCount = 0;
       this.nextWalSeq = 1;
       this.hits = 0;
       this.misses = 0;
@@ -308,7 +358,7 @@
     }
 
     replayWalUpTo(count) {
-      this.entries = [];
+      this.clearMemoryOnly();
       const limit = Math.min(count, this.walRecords.length);
       for (let i = 0; i < limit; i++) {
         const rec = this.walRecords[i];
@@ -325,8 +375,15 @@
   const state = {
     liveMode: false,
     bridgeConnected: false,
+    clusterAvailable: false,
+    benchmarkRunning: false,
     reducedMotion: false,
     ws: null,
+    clusterPollTimer: null,
+    operationSeq: 0,
+    pendingOperations: new Map(),
+    benchmarkRequestId: null,
+    latestClusterSnapshot: null,
 
     nodes: {
       1: new SimulatedDataNode(1, 8001, 'node_1.log', 5),
@@ -338,7 +395,7 @@
     arch: {
       op: 'PUT',
       key: 'session:4092',
-      val: 'uid=8810;role=admin',
+      val: 'user=8810',
       currentStage: 0,
       maxStage: 6,
       timer: null,
@@ -346,6 +403,9 @@
       activePlan: null,
       logs: [],
       stepSeq: 1,
+      productHistory: [],
+      productSequenceIndex: 0,
+      productLastResult: null,
     },
 
     // Section 6: Ring State
@@ -355,13 +415,16 @@
     // Section 7: Cache Engine State
     cacheSelectedNode: 1,
     cacheOp: 'PUT',
-    lastCacheBanner: 'O(1) Pointer Splice on GET / PUT / DELETE',
+    lastCacheBanner: 'Map lookup is average-case O(1); list pointer updates are O(1).',
+    cacheAnimation: null,
 
     // Section 9: WAL & Recovery State
     walSelectedNode: 1,
     recoveryStep: 1, // 1..6
     recoveryReplayedCount: 0,
     recoveryTimer: null,
+    recoveryPending: false,
+    recoveryAutoRun: false,
 
     // Section 10: Performance Lab State
     perfViewMode: 'coordinator', // 'coordinator' | 'single_node'
@@ -369,25 +432,226 @@
       coordinator: null,
       single_node: null,
     },
+    productReport: null,
   };
 
-  // Seed initial deterministic keys across the cluster so all views start populated
-  function seedInitialClusterState() {
-    const initialSeeds = [
-      ['user:101', 'Alice_BTech_CSE'],
-      ['session:4092', 'uid=8810;role=admin'],
-      ['invoice:9004', 'status=paid;amt=1200'],
-      ['acct:301', 'bal=4500'],
-      ['config:timeout', '3000ms'],
-      ['job:worker:7', 'active_shard_2'],
-      ['cache:block:7', '0xFFA0192B'],
-      ['metric:cpu:0', 'load=0.42'],
-      ['course:cs401', 'Distributed_Systems'],
-    ];
-    for (const [k, v] of initialSeeds) {
-      const r = hashRing.route(k);
-      state.nodes[r.physical.nodeId].put(k, v, false);
+  const routeContent = {
+    '/': null,
+    '/playground': {
+      what: 'A request asks to store, read or remove one key-value pair. The coordinator chooses one data node and that node runs the operation.',
+      try: 'Choose PUT, GET or DELETE. Use a sample key, then Run or Step Forward to see each stage and the result.',
+      outcome: 'Start with the sample PUT to watch a request reach its node.',
+      how: 'The browser simulation mirrors the coordinator route and LRU/WAL flow. In live mode, the result is shown only after the C++ node responds.',
+    },
+    '/hash-ring': {
+      what: 'The hash ring is a map that assigns each key to one of three data nodes. It uses many virtual positions to spread ownership around the ring.',
+      try: 'Enter a key or choose a sample. Recalculate to see its hash, clockwise successor and destination node.',
+      outcome: 'A sample key is ready. Recalculate its route to inspect the result.',
+      how: 'Both key bytes and vnode labels are hashed with MurmurHash3 x86-32 using seed 0. The first vnode at or after the key hash wins; if none exists, lookup wraps to the first vnode.',
+    },
+    '/cache': {
+      what: 'Each data node keeps recently used values in memory. A GET or PUT moves a key to the front; when capacity is full, a new PUT evicts the least recently used key.',
+      try: 'Use the sample controls to PUT, GET and DELETE keys. Set a small demo capacity, then fill it and insert another key to see eviction.',
+      outcome: 'The selected data node starts with sample cache entries.',
+      how: 'The simulation and C++ implementation pair a key index with a doubly linked list. Map lookup is average-case O(1); list promotion and unlink are O(1). A successful GET takes an exclusive cache lock because it changes recency.',
+    },
+    '/recovery': {
+      what: 'A write-ahead log records mutations so a data node can rebuild its in-memory cache by replaying that node’s own log.',
+      try: 'Append a PUT or DELETE, then step through a simulated restart and local-log replay.',
+      outcome: 'The current node’s demo log is ready. Append a mutation to begin.',
+      how: 'The C++ implementation appends and calls C++ stream flush before changing memory. It does not call fsync/fdatasync, so this is not a power-loss durability guarantee. The UI crash is a simulation, not a process termination.',
+    },
+    '/performance': {
+      what: 'Compare a direct data-node benchmark with requests routed through the coordinator.',
+      try: 'Set workload mix, workers and request count. Generate illustrative data for a demo, or run a live benchmark only when all C++ nodes are online.',
+      outcome: 'Initial charts are explicitly illustrative. Their provenance is shown beside every report.',
+      how: 'Live measurements come from load_tester.py and include failed attempts in elapsed-time throughput. Imported reports are validated before display.',
+    },
+    '/architecture': {
+      what: 'The coordinator routes requests but does not store values. Three independent data nodes each own a cache and a local WAL.',
+      try: 'Review the process map, request protocol, concurrency pipeline and implementation notes. Use the playground to trace a key end to end.',
+      outcome: 'The system topology and implementation limits are summarized below.',
+      how: 'The C++ services use raw TCP with a 10-byte request header and 16-byte response header. There is no replication, consensus or automatic failover.',
+    },
+  };
+
+  const routeSections = {
+    '/': ['productHome'],
+    '/playground': ['productPlayground'],
+    '/how-it-works': ['productHow'],
+    '/performance': ['productPerformance'],
+    '/guide': ['productGuide'],
+    '/hash-ring': ['productHow'],
+    '/cache': ['productHow'],
+    '/recovery': ['productHow'],
+    '/architecture': ['productHow'],
+  };
+
+  let currentRoute = '/';
+  const learning = {
+    mode: 'route',
+    step: -1,
+    timer: null,
+    crashedNodeId: null,
+    recoveryMessage: 'No simulated crash.',
+  };
+  const tour = {
+    active: false,
+    step: 0,
+    completed: 0,
+    key: 'session:4092',
+    results: [],
+    attempt: null,
+  };
+  const tourSteps = [
+    {
+      op: 'PUT',
+      status: 0,
+      title: 'Store a sample value',
+      instruction: 'Run PUT with the sample key and value. The coordinator routes the key, then the node logs and stores it.',
+      expected: '“Value stored”; the selected node cache and local log change.',
+    },
+    {
+      op: 'GET',
+      status: 0,
+      title: 'Retrieve the value',
+      instruction: 'Run GET with the same key. A successful lookup returns the value and promotes it to most recently used.',
+      expected: '“Value found: user=8810”; the cache order may change, but the log does not.',
+    },
+    {
+      op: 'DELETE',
+      status: 0,
+      title: 'Delete the key',
+      instruction: 'Run DELETE with the same key. The node records the mutation before removing the in-memory entry.',
+      expected: '“Key deleted”; the entry leaves cache memory and a DELETE record is added.',
+    },
+    {
+      op: 'GET',
+      status: 1,
+      title: 'Observe a cache miss',
+      instruction: 'Run GET again. The key is now absent, so the node returns a not-found result.',
+      expected: '“Key not found”; memory and the log stay unchanged by this GET.',
+    },
+  ];
+
+  function setRouteOutcome(text) {
+    const outcome = document.getElementById('routeOutcome');
+    if (outcome) outcome.textContent = text;
+  }
+
+  function arrangeArchitectureContent() {
+    const details = document.getElementById('architectureDetails');
+    const topology = document.querySelector('#overview .overview-preview-panel');
+    const concurrency = document.querySelector('#cache-engine .concurrency-panel');
+    const reference = document.getElementById('reference-summary');
+    if (details && topology && !document.getElementById('architectureTopology')) {
+      const topologyCopy = topology.cloneNode(true);
+      topologyCopy.id = 'architectureTopology';
+      const title = topologyCopy.querySelector('.panel-title');
+      if (title) title.textContent = 'Process topology and network boundaries';
+      details.append(topologyCopy);
     }
+    if (details && concurrency && concurrency.parentElement !== details) details.append(concurrency);
+    if (details && reference && reference.parentElement !== details) details.append(reference);
+  }
+
+  function navigateToRoute(pathname, options = {}) {
+    const requestedPath = routeSections[pathname] ? pathname : '/';
+    const path = ['/hash-ring', '/cache', '/recovery', '/architecture'].includes(requestedPath)
+      ? '/how-it-works'
+      : requestedPath;
+    const sectionIds = routeSections[path];
+    currentRoute = path;
+    if (path !== '/how-it-works') pauseLearningAnimation();
+    if (options.push !== false && location.pathname !== path) history.pushState({}, '', path);
+    if (options.push === false && location.pathname !== path) history.replaceState({}, '', path);
+
+    document.querySelectorAll('.lab-section, #architectureReference').forEach((section) => {
+      section.hidden = !sectionIds.includes(section.id);
+    });
+    document.querySelectorAll('.dc-page').forEach((section) => {
+      section.hidden = !sectionIds.includes(section.id);
+    });
+    const intro = document.getElementById('routeIntro');
+    const copy = routeContent[path];
+    const pageTitle = {
+      '/': 'Home',
+      '/playground': 'Playground',
+      '/how-it-works': 'How it works',
+      '/performance': 'Performance',
+      '/guide': 'User guide',
+    }[path];
+    document.title = `${pageTitle} · DisCache`;
+    intro.hidden = !copy;
+    if (copy) {
+      document.getElementById('routeWhat').textContent = copy.what;
+      document.getElementById('routeTry').textContent = copy.try;
+      document.getElementById('routeOutcome').textContent = copy.outcome;
+      document.getElementById('routeHow').textContent = copy.how;
+    }
+
+    document.querySelectorAll('[data-route-link]').forEach((link) => {
+      const active = link.getAttribute('href') === path;
+      link.classList.toggle('active', active && link.classList.contains('dc-nav-link'));
+      if (link.classList.contains('dc-nav-link')) {
+        if (active) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
+      }
+    });
+    if (options.scroll !== false) window.scrollTo({ top: 0, behavior: 'instant' });
+    requestAnimationFrame(refreshScrollReveals);
+  }
+
+  function refreshScrollReveals() {
+    const targets = document.querySelectorAll('.lab-section:not([hidden]) .panel, .lab-section:not([hidden]) .fact-card, .lab-section:not([hidden]) .metric-tile, .dc-page:not([hidden]) .dc-card, .dc-page:not([hidden]) .dc-concept');
+    if (state.reducedMotion || !('IntersectionObserver' in window)) {
+      targets.forEach((target) => target.classList.add('is-visible'));
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('is-visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08 });
+
+    targets.forEach((target) => {
+      target.classList.add('scroll-reveal');
+      if (!target.classList.contains('is-visible')) observer.observe(target);
+    });
+  }
+
+  function applyTheme(choice, persist = false) {
+    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const resolved = choice === 'system' ? (systemDark ? 'dark' : 'light') : choice;
+    document.documentElement.dataset.theme = resolved;
+    document.documentElement.dataset.themeChoice = choice;
+    const selector = document.getElementById('themeSelect');
+    if (selector) selector.value = choice;
+    if (persist) {
+      try {
+        localStorage.setItem('discache-theme', choice);
+      } catch (_) {}
+    }
+  }
+
+  function initializeTheme() {
+    let choice = 'dark';
+    try {
+      const saved = localStorage.getItem('discache-theme');
+      if (saved === 'dark' || saved === 'light' || saved === 'system') choice = saved;
+    } catch (_) {}
+    applyTheme(choice);
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (document.documentElement.dataset.themeChoice === 'system') applyTheme('system');
+    });
+  }
+
+  // Start with an empty demo cache so the first PUT has a clear, repeatable effect.
+  function seedInitialClusterState() {
     state.recoveryReplayedCount = state.nodes[state.walSelectedNode].walRecords.length;
   }
 
@@ -403,15 +667,30 @@
 
       ws.onopen = () => {
         state.bridgeConnected = true;
+        updateModeIndicator();
         ws.send(JSON.stringify({ type: 'inspect_cluster' }));
+        state.clusterPollTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'inspect_cluster' }));
+          }
+        }, 2500);
       };
 
       ws.onclose = () => {
+        const wasLive = state.liveMode;
         state.bridgeConnected = false;
-        if (state.liveMode) {
-          state.liveMode = false;
-          updateModeIndicator();
-        }
+        state.clusterAvailable = false;
+        state.latestClusterSnapshot = null;
+        state.benchmarkRunning = false;
+        state.benchmarkRequestId = null;
+        const benchmarkButton = document.getElementById('runLiveBenchBtn');
+        if (benchmarkButton) benchmarkButton.textContent = 'Run Benchmark';
+        failPendingLiveOperations('The browser bridge disconnected.');
+        if (state.clusterPollTimer) clearInterval(state.clusterPollTimer);
+        state.clusterPollTimer = null;
+        state.liveMode = false;
+        if (wasLive) restoreDemoCluster();
+        updateModeIndicator();
       };
 
       ws.onmessage = (evt) => {
@@ -444,11 +723,13 @@
       target.misses = liveNode.misses;
       target.evictions = liveNode.evictions;
       target.totalReqs = liveNode.totalReqs;
-      target.entries = (liveNode.entries || []).map((e) => ({
-        key: e.key,
-        value: e.value,
-        addr: '0x' + (0x7f0010 + ((murmurhash3_x86_32(e.key) & 0xfff) << 4)).toString(16).toUpperCase(),
-      }));
+      target.reportedSize = Number(liveNode.size || 0);
+      target.reportedMruKey = liveNode.mruKey || '';
+      target.reportedLruKey = liveNode.lruKey || '';
+      target.clearMemoryOnly();
+      for (const entry of [...(liveNode.entries || [])].reverse()) {
+        target.put(entry.key, entry.value, true);
+      }
       target.walRecords = (liveNode.walRecords || []).map((w) => ({
         seq: w.seq,
         timestampMs: w.timestampMs,
@@ -456,74 +737,295 @@
         key: w.key,
         value: w.value,
       }));
-      target.nextWalSeq = (liveNode.walSeq || target.walRecords.length) + 1;
+      target.walRecordCount = Number(liveNode.walSeq || 0);
+      target.nextWalSeq = target.walRecordCount + 1;
+      target.totalReqs = Number(liveNode.totalReqs || 0);
     }
 
     renderClusterNodeCards();
     renderCacheEngineView();
     renderWalRecoveryView();
+    renderProductExperience();
+  }
+
+  function restoreDemoCluster() {
+    stopArchAutoRun();
+    state.arch.currentStage = 0;
+    state.arch.activePlan = null;
+    state.arch.logs = [];
+    state.arch.stepSeq = 1;
+    state.arch.productHistory = [];
+    state.arch.productSequenceIndex = 0;
+    state.arch.productLastResult = null;
+    for (const node of Object.values(state.nodes)) {
+      node.clearAll();
+      node.setCapacity(5);
+      node.reportedSize = null;
+      node.reportedMruKey = null;
+      node.reportedLruKey = null;
+    }
+    seedInitialClusterState();
+    state.recoveryStep = 1;
+    state.recoveryReplayedCount = state.nodes[state.walSelectedNode].walRecords.length;
+    renderClusterNodeCards();
+    renderCacheEngineView();
+    renderWalRecoveryView();
+    renderArchEventLog();
+    renderProductExperience();
   }
 
   function handleBridgeMessage(msg) {
     if (msg.type === 'cluster_snapshot') {
       const snap = msg.snapshot;
-      const isClusterLive =
+      state.latestClusterSnapshot = snap || null;
+      state.clusterAvailable = Boolean(
         snap &&
         snap.coordinatorOnline &&
         snap.nodesOnline &&
         snap.nodesOnline[1] &&
         snap.nodesOnline[2] &&
-        snap.nodesOnline[3];
+        snap.nodesOnline[3]
+      );
 
-      if (isClusterLive && state.liveMode) {
+      if (state.clusterAvailable && state.liveMode) {
         syncSnapshotFromLiveCluster(snap);
       }
-      updateModeIndicator(isClusterLive);
+      if (!state.clusterAvailable && state.liveMode) {
+        state.liveMode = false;
+        restoreDemoCluster();
+      }
+      if (!state.clusterAvailable) {
+        if (state.benchmarkRunning) {
+          state.benchmarkRunning = false;
+          state.benchmarkRequestId = null;
+          showPerformanceError('LIVE BENCHMARK INTERRUPTED: the C++ cluster became unavailable. No replacement simulation was generated.');
+        }
+        failPendingLiveOperations('The C++ cluster is no longer available.');
+      }
+      updateModeIndicator();
     } else if (msg.type === 'op_result') {
+      if (msg.snapshot) state.latestClusterSnapshot = msg.snapshot;
       if (state.liveMode && msg.snapshot) {
         syncSnapshotFromLiveCluster(msg.snapshot);
       }
+      completeLiveOperation(msg);
+      updateModeIndicator();
     } else if (msg.type === 'recover_result' || msg.type === 'config_result') {
+      if (msg.snapshot) state.latestClusterSnapshot = msg.snapshot;
       if (state.liveMode && msg.snapshot) {
         syncSnapshotFromLiveCluster(msg.snapshot);
       }
+      completeLiveOperation(msg);
     } else if (msg.type === 'benchmark_result') {
+      if (msg.requestId !== state.benchmarkRequestId) return;
+      state.benchmarkRunning = false;
+      state.benchmarkRequestId = null;
+      state.benchmarkRequestId = null;
       const btn = document.getElementById('runLiveBenchBtn');
       if (btn) {
-        btn.disabled = false;
+        btn.disabled = !state.bridgeConnected || !state.clusterAvailable;
         btn.textContent = 'Run Benchmark';
       }
       if (msg.report) {
-        applyBenchmarkReport(msg.report, 'MEASURED EXECUTION DATA (PYTHON LOAD TESTER)');
+        try {
+          validateBenchmarkReport(msg.report);
+          applyBenchmarkReport(msg.report, 'MEASURED EXECUTION DATA (PYTHON LOAD TESTER)');
+        } catch (err) {
+          showPerformanceError(`LIVE BENCHMARK REPORT INVALID: ${err.message}`);
+        }
       }
       if (state.liveMode && msg.snapshot) {
+        state.latestClusterSnapshot = msg.snapshot;
         syncSnapshotFromLiveCluster(msg.snapshot);
       }
-    } else if (msg.type === 'error') {
-      const btn = document.getElementById('runLiveBenchBtn');
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = 'Run Benchmark';
+      completeLiveOperation(msg);
+    } else if (msg.type === 'benchmark_started') {
+      if (msg.requestId === state.benchmarkRequestId) {
+        state.benchmarkRunning = true;
+        updateModeIndicator();
       }
+    } else if (msg.type === 'error') {
+      const handledOperation = completeLiveOperation(msg, msg.message || 'Unknown bridge error');
+      const benchmarkFailed = msg.requestId && msg.requestId === state.benchmarkRequestId;
+      if (benchmarkFailed) {
+        state.benchmarkRunning = false;
+        state.benchmarkRequestId = null;
+      }
+      if (benchmarkFailed) {
+        const btn = document.getElementById('runLiveBenchBtn');
+        if (btn) {
+          btn.disabled = !state.bridgeConnected || !state.clusterAvailable;
+          btn.textContent = 'Run Benchmark';
+        }
+      }
+      if (!handledOperation) {
+        showPerformanceError(`LIVE REQUEST FAILED: ${msg.message || 'Unknown bridge error'}. Use Generate Illustrative Sample for simulated data.`);
+      }
+      updateModeIndicator();
     }
   }
 
-  function updateModeIndicator(liveClusterAvailable = false) {
+  function sendLiveOperation(message, callback) {
+    if (!state.clusterAvailable || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      callback(null, 'The C++ coordinator and all three data nodes are not connected.');
+      return null;
+    }
+
+    const requestId = `ui-${++state.operationSeq}`;
+    state.pendingOperations.set(requestId, callback);
+    updateModeIndicator();
+    try {
+      state.ws.send(JSON.stringify({ ...message, requestId }));
+    } catch (error) {
+      state.pendingOperations.delete(requestId);
+      callback(null, error.message);
+      return null;
+    }
+    return requestId;
+  }
+
+  function completeLiveOperation(message, error = null) {
+    const callback = message.requestId && state.pendingOperations.get(message.requestId);
+    if (!callback) return false;
+    state.pendingOperations.delete(message.requestId);
+    callback(message.result || null, error, message);
+    updateModeIndicator();
+    return true;
+  }
+
+  function failPendingLiveOperations(message) {
+    for (const [requestId, callback] of state.pendingOperations) {
+      state.pendingOperations.delete(requestId);
+      callback(null, message);
+    }
+    updateModeIndicator();
+  }
+
+  function updateModeIndicator() {
     const badgeBtn = document.getElementById('modeToggleBtn');
     const badgeText = document.getElementById('modeBadgeText');
     const walNotice = document.getElementById('walSimNoticeBadge');
+    const liveClusterAvailable = state.bridgeConnected && state.clusterAvailable;
+
+    badgeBtn.disabled = !liveClusterAvailable && !state.liveMode;
+    badgeBtn.disabled = badgeBtn.disabled || state.pendingOperations.size > 0 || state.benchmarkRunning;
+    badgeBtn.title = liveClusterAvailable
+      ? 'Toggle between the deterministic demo and the connected C++20 cluster'
+      : state.bridgeConnected
+      ? 'Live mode unavailable: the coordinator and all three data nodes must be online'
+      : 'Live mode unavailable: the browser bridge is not connected';
+    const liveBenchBtn = document.getElementById('runLiveBenchBtn');
+    if (liveBenchBtn) {
+      liveBenchBtn.disabled = !liveClusterAvailable || state.benchmarkRunning;
+    }
+    const productLiveBenchBtn = document.getElementById('productRunLiveBtn');
+    if (productLiveBenchBtn) {
+      productLiveBenchBtn.disabled = !liveClusterAvailable || state.benchmarkRunning;
+      productLiveBenchBtn.textContent = state.benchmarkRunning
+        ? 'Running live benchmark…'
+        : liveClusterAvailable
+        ? 'Run live benchmark'
+        : 'Run live benchmark · unavailable';
+      productLiveBenchBtn.title = liveClusterAvailable
+        ? 'Run load_tester.py against the connected C++ cluster'
+        : 'Connect the coordinator and all three C++ data nodes to enable live benchmarks';
+    }
+    ['cacheSeedEvictBtn', 'walResetDemoBtn'].forEach((id) => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = state.liveMode;
+    });
 
     if (state.liveMode) {
       badgeBtn.classList.add('live-active');
-      badgeText.textContent = 'LIVE C++20 CLUSTER (:8000–:8003)';
+      badgeText.textContent = 'Live · C++ cluster';
       if (walNotice) walNotice.textContent = 'CONNECTED TO LIVE C++ DATA NODE WAL';
     } else {
       badgeBtn.classList.remove('live-active');
-      badgeText.textContent = liveClusterAvailable
-        ? 'DEMO MODE: SIMULATED DATA (CLICK FOR LIVE C++)'
-        : 'DEMO MODE: SIMULATED DATA';
+      badgeText.textContent = 'Demo · simulated';
       if (walNotice) walNotice.textContent = 'VISUAL SIMULATION (LOCAL NODE SCOPE)';
     }
+    const modeLabel = document.getElementById('demoModeLabel');
+    const modePill = document.getElementById('demoModePill');
+    if (modeLabel) modeLabel.textContent = state.liveMode ? 'LIVE C++ CLUSTER' : 'SIMULATED';
+    if (modePill) modePill.textContent = state.liveMode ? 'LIVE C++' : 'SIMULATED';
+    renderProductExperience();
+  }
+
+  function showPerformanceError(message) {
+    const banner = document.getElementById('perfValidationMsg');
+    if (!banner) return;
+    banner.hidden = false;
+    banner.textContent = message;
+    const productBanner = document.getElementById('productBenchmarkError');
+    if (productBanner) {
+      productBanner.hidden = false;
+      productBanner.textContent = message;
+    }
+  }
+
+  function finishLiveArchitectureRequest(plan, result, error, responseMessage) {
+    if (state.arch.activePlan !== plan) {
+      if (error && plan.pending) {
+        plan.pending = false;
+        plan.statusHex = '0x02 (ERROR)';
+        plan.executionOutcomeText = `LIVE REQUEST FAILED: ${error}`;
+        plan.routeMatches = null;
+        recordProductOperation(plan);
+      }
+      return;
+    }
+    plan.pending = false;
+    const node = state.nodes[plan.targetNodeId];
+    const stageStatus = document.getElementById('archStageStatusText');
+    const routeMatches = result && result.nodeId === plan.targetNodeId &&
+      result.keyHash === plan.routeInfo.keyHash &&
+      result.vnodeHash === plan.routeInfo.successor.hashPos;
+    plan.routeMatches = result ? Boolean(routeMatches) : null;
+
+    if (error || !result) {
+      plan.statusHex = '0x02 (ERROR)';
+      plan.executionOutcomeText = `LIVE REQUEST FAILED: ${error || 'No response received'}`;
+    } else {
+      const statusName = result.status === 0 ? 'OK' : result.status === 1 ? 'NOT_FOUND' : 'ERROR';
+      plan.statusHex = `0x${result.status.toString(16).padStart(2, '0').toUpperCase()} (${statusName})`;
+      plan.executionOutcomeText = `LIVE ${statusName}: ${result.payload || '(empty payload)'}`;
+      if (!routeMatches) {
+        plan.executionOutcomeText += ` · ROUTE MISMATCH: backend node/hash ${result.nodeId}/${toHex32(result.keyHash)}/${toHex32(result.vnodeHash)}`;
+      }
+      if (responseMessage) plan.response = result;
+    }
+
+    if (plan.op === 'GET') {
+      document.getElementById('pipeWALInfo').textContent = 'No WAL write (GET)';
+      document.getElementById('pipeLRUInfo').textContent = result && result.status === 0
+        ? `LIVE HIT → MRU: ${plan.key}`
+        : `LIVE MISS / ERROR: ${plan.key}`;
+      stageStatus.textContent = `STAGE 5: LIVE GET RESPONSE FROM DATA NODE ${plan.targetNodeId}`;
+    } else {
+      document.getElementById('pipeWALInfo').textContent = `WAL sequence #${node.walRecordCount} · stream flushed`;
+      document.getElementById('pipeLRUInfo').textContent = `LIVE ${result?.status === 0 ? 'UPDATED' : 'UNCHANGED'} · ${node.entries.length}/${node.capacity}`;
+      stageStatus.textContent = `STAGE 5: LIVE ${plan.op} RESPONSE FROM DATA NODE ${plan.targetNodeId}`;
+    }
+
+    setRouteOutcome(`LIVE ${plan.op} "${plan.key}" → ${plan.statusHex} · Data Node ${plan.targetNodeId} · ${plan.executionOutcomeText}`);
+    renderClusterNodeCards(plan.targetNodeId, true, plan.op !== 'GET');
+    renderCacheEngineView();
+    renderWalRecoveryView();
+    appendArchLog(
+      'STEP 5/6',
+      `Live ${plan.op} Result`,
+      `Data Node ${plan.targetNodeId}`,
+      `${plan.executionOutcomeText}${error ? '' : ` · Backend route ${routeMatches ? 'matches' : 'does not match'} the browser calculation.`}`
+    );
+    const runButton = document.getElementById('archRunBtn');
+    runButton.disabled = false;
+    runButton.textContent = 'Run';
+    if (plan.resumeAfterLive) {
+      state.arch.currentStage = 6;
+      applyArchStageVisuals(6);
+    }
+    recordProductOperation(plan);
+    renderProductExperience();
   }
 
   // ==========================================================================
@@ -554,7 +1056,7 @@
       lruBox.classList.toggle('active-internal', activeNodeId === nid && highlightLru);
       walBox.classList.toggle('active-internal', activeNodeId === nid && highlightWal);
 
-      countLbl.textContent = `${node.entries.length} / ${node.capacity} entries`;
+      countLbl.textContent = `${node.reportedSize ?? node.entries.length} / ${node.capacity} entries`;
       if (node.entries.length === 0) {
         lruPrev.textContent = 'Empty (MRU Head: —)';
       } else {
@@ -714,6 +1216,7 @@
       document.getElementById('pipeWALInfo').textContent = 'Write-Ahead Log';
       updateRoutingBranchSvg(null, false);
       renderClusterNodeCards(null, false, false);
+      renderProductExperience();
       return;
     }
 
@@ -740,8 +1243,8 @@
       appendArchLog(
         'STEP 1/6',
         `Serialize ${plan.op} Frame`,
-        'Python Load Tester',
-        `Constructed 10-byte binary header [Magic=0xDC, Op=${plan.opHex}, KeyLen=${plan.keyBytes}, ValLen=${plan.valBytes}] and opened raw TCP stream to Coordinator 127.0.0.1:8000.`
+        'Browser Playground',
+        `Constructed the 10-byte request preview [Magic=0xDC, Op=${plan.opHex}, KeyLen=${plan.keyBytes}, ValLen=${plan.valBytes}]. ${state.liveMode ? 'The bridge will send it to the live coordinator.' : 'The browser will continue through the deterministic simulation.'}`
       );
     } else if (stageIndex === 2) {
       stageStatus.textContent = 'STAGE 2: COORDINATOR HASHES KEY VIA MURMURHASH3';
@@ -782,22 +1285,34 @@
         `Coordinator forwarded binary request over TCP to 127.0.0.1:${plan.targetPort}. Data Node select() multiplexer dispatched socket task to its Bounded Thread Pool.`
       );
     } else if (stageIndex === 5) {
-      // Execute the actual operation on the node if not yet executed
       if (!plan.executedMutation) {
         plan.executedMutation = true;
-
-        if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-          state.ws.send(
-            JSON.stringify({
-              type: 'execute_op',
-              op: plan.op,
-              key: plan.key,
-              value: plan.val,
-            })
+        if (state.liveMode) {
+          plan.pending = true;
+          plan.liveExecution = true;
+          plan.resumeAfterLive = state.arch.running;
+          stageStatus.textContent = `STAGE 5: WAITING FOR LIVE DATA NODE ${plan.targetNodeId}`;
+          document.getElementById('pipeWALInfo').textContent = plan.op === 'GET'
+            ? 'Awaiting response · GET does not append WAL'
+            : 'Awaiting node WAL and cache result';
+          document.getElementById('pipeLRUInfo').textContent = 'Awaiting live response';
+          appendArchLog(
+            'STEP 5/6',
+            `Send Live ${plan.op}`,
+            `Data Node ${plan.targetNodeId}`,
+            `Request sent through the bridge. Waiting for the C++ response before updating this view.`
           );
-        }
-
-        if (plan.op === 'PUT') {
+          if (plan.resumeAfterLive) stopArchAutoRun();
+          document.getElementById('archRunBtn').disabled = true;
+          sendLiveOperation({
+            type: 'execute_op',
+            op: plan.op,
+            key: plan.key,
+            value: plan.val,
+          }, (result, error, responseMessage) => {
+            finishLiveArchitectureRequest(plan, result, error, responseMessage);
+          });
+        } else if (plan.op === 'PUT') {
           const res = nodeObj.put(plan.key, plan.val, false);
           plan.statusHex = '0x00 (STATUS_OK)';
           plan.executionOutcomeText = res.evicted
@@ -806,16 +1321,18 @@
             ? `Updated "${plan.key}"="${plan.val}" and promoted to MRU Head`
             : `Inserted "${plan.key}"="${plan.val}" at MRU Head`;
 
-          stageStatus.textContent = `STAGE 5: WAL APPEND (${plan.walFile}) → O(1) LRU CACHE UPDATE`;
-          document.getElementById('pipeWALInfo').textContent = `Appended SEQ #${nodeObj.walRecords.length} + Flushed`;
+          stageStatus.textContent = `STAGE 5: WAL APPEND (${plan.walFile}) → LRU CACHE UPDATE`;
+          document.getElementById('pipeWALInfo').textContent = `Appended SEQ #${nodeObj.walRecordCount} + Stream Flushed`;
           document.getElementById('pipeLRUInfo').textContent = `MRU Head: ${plan.key}`;
           renderClusterNodeCards(plan.targetNodeId, true, true);
           appendArchLog(
             'STEP 5/6',
             'WAL Flush + LRU PUT',
             `Node ${plan.targetNodeId} WAL & LRUCache`,
-            `1) Appended PUT "${plan.key}" to ${plan.walFile} (SEQ #${nodeObj.walRecords.length}) and flushed durable record. 2) Acquired std::unique_lock<std::shared_mutex> and ${plan.executionOutcomeText}.`
+            `1) Appended PUT "${plan.key}" to ${plan.walFile} (SEQ #${nodeObj.walRecordCount}) and flushed the C++ stream. 2) Acquired std::unique_lock<std::shared_mutex> and ${plan.executionOutcomeText}.`
           );
+          renderCacheEngineView();
+          renderWalRecoveryView();
         } else if (plan.op === 'DELETE') {
           const res = nodeObj.del(plan.key, false);
           plan.statusHex = res.removed ? '0x00 (STATUS_OK)' : '0x01 (NOT_FOUND)';
@@ -823,39 +1340,38 @@
             ? `Removed "${plan.key}" from std::unordered_map and unlinked Doubly Linked List node`
             : `Key "${plan.key}" not present in cache`;
 
-          stageStatus.textContent = `STAGE 5: WAL APPEND (${plan.walFile}) → O(1) LRU DELETE`;
-          document.getElementById('pipeWALInfo').textContent = `Appended SEQ #${nodeObj.walRecords.length} + Flushed`;
+          stageStatus.textContent = `STAGE 5: WAL APPEND (${plan.walFile}) → LRU DELETE`;
+          document.getElementById('pipeWALInfo').textContent = `Appended SEQ #${nodeObj.walRecordCount} + Stream Flushed`;
           document.getElementById('pipeLRUInfo').textContent = `Size: ${nodeObj.entries.length}/${nodeObj.capacity}`;
           renderClusterNodeCards(plan.targetNodeId, true, true);
           appendArchLog(
             'STEP 5/6',
             'WAL Flush + LRU DELETE',
             `Node ${plan.targetNodeId} WAL & LRUCache`,
-            `1) Appended DELETE "${plan.key}" to ${plan.walFile} (SEQ #${nodeObj.walRecords.length}) and flushed to disk. 2) ${plan.executionOutcomeText}.`
+            `1) Appended DELETE "${plan.key}" to ${plan.walFile} (SEQ #${nodeObj.walRecordCount}) and flushed the C++ stream. 2) ${plan.executionOutcomeText}.`
           );
+          renderCacheEngineView();
+          renderWalRecoveryView();
         } else {
-          // GET
           const res = nodeObj.get(plan.key);
           plan.statusHex = res.hit ? '0x00 (STATUS_OK / HIT)' : '0x01 (NOT_FOUND / MISS)';
           plan.executionOutcomeText = res.hit
             ? `CACHE HIT: Value="${res.value}" (Promoted "${plan.key}" to MRU Head)`
             : `CACHE MISS: Key "${plan.key}" not found in Node ${plan.targetNodeId}`;
 
-          stageStatus.textContent = `STAGE 5: O(1) LRU CACHE LOOKUP (NO WAL WRITE ON GET)`;
-          document.getElementById('pipeWALInfo').textContent = `Bypassed (Read-Only GET)`;
+          stageStatus.textContent = 'STAGE 5: LRU CACHE LOOKUP (NO WAL WRITE ON GET)';
+          document.getElementById('pipeWALInfo').textContent = 'Bypassed (Read-Only GET)';
           document.getElementById('pipeLRUInfo').textContent = res.hit ? `HIT → MRU: ${plan.key}` : `MISS (${plan.key})`;
           renderClusterNodeCards(plan.targetNodeId, true, false);
           appendArchLog(
             'STEP 5/6',
-            'O(1) LRU Lookup',
+            'LRU Lookup',
             `Node ${plan.targetNodeId} LRUCache`,
-            `${plan.executionOutcomeText}. Read operation does not mutate ${plan.walFile}.`
+            `${plan.executionOutcomeText}. GET updates recency under an exclusive cache lock and does not mutate ${plan.walFile}.`
           );
+          renderCacheEngineView();
+          renderWalRecoveryView();
         }
-
-        // Sync other visualizers
-        renderCacheEngineView();
-        renderWalRecoveryView();
       }
     } else if (stageIndex === 6) {
       stageStatus.textContent = `STAGE 6: COMPLETE — 16-BYTE BINARY RESPONSE RETURNED TO CLIENT`;
@@ -870,6 +1386,7 @@
         <span><strong>VNODE_HASH:</strong> ${toHex32(plan.routeInfo.successor.hashPos)}</span>
         <span><strong>RESULT:</strong> ${escapeHtml(plan.executionOutcomeText)}</span>
       `;
+      setRouteOutcome(`${plan.op} "${plan.key}" → ${plan.statusHex}. Data Node ${plan.targetNodeId} (:${plan.targetPort}); ${plan.executionOutcomeText}.`);
 
       appendArchLog(
         'STEP 6/6',
@@ -878,13 +1395,17 @@
         `Returned 16-byte response header [Magic=0xDC, Status=${plan.statusHex}, Node=${plan.targetNodeId}] to Python client.`
       );
       stopArchAutoRun();
+      recordProductOperation(plan);
     }
+    renderProductExperience();
   }
 
   function stepArchForward() {
+    if (state.arch.activePlan?.pending) return;
     if (state.arch.currentStage === 0 || state.arch.currentStage >= state.arch.maxStage) {
       const plan = buildArchitectureExecutionPlan();
       if (!plan) return;
+      state.arch.productLastResult = null;
       state.arch.activePlan = plan;
       state.arch.currentStage = 1;
     } else {
@@ -941,6 +1462,7 @@
 
   function resetArchFlow() {
     stopArchAutoRun();
+    document.getElementById('archRunBtn').disabled = false;
     state.arch.currentStage = 0;
     state.arch.activePlan = null;
     applyArchStageVisuals(0);
@@ -980,6 +1502,7 @@
     state.ringKey = key;
 
     const routeRes = hashRing.route(key);
+    setRouteOutcome(`"${key}" hashes to ${toHex32(routeRes.keyHash)} and routes clockwise to ${routeRes.physical.name} (:${routeRes.physical.port}) via ${routeRes.successor.label}${routeRes.wrapped ? ' after wrapping to the ring start' : ''}.`);
     const keyDeg = ((routeRes.keyHash / 4294967296) * 360).toFixed(2);
     const vnodeDeg = ((routeRes.successor.hashPos / 4294967296) * 360).toFixed(2);
 
@@ -1009,7 +1532,7 @@
     parts.push(`
       <defs>
         <marker id="ringArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <path d="M 0 1 L 9 5 L 0 9 z" fill="#000000" />
+          <path d="M 0 1 L 9 5 L 0 9 z" fill="var(--purple)" />
         </marker>
       </defs>
     `);
@@ -1019,7 +1542,7 @@
     const cwArcEnd = polarToXY(cx, cy, R + 32, -Math.PI * 0.37);
     parts.push(`
       <path d="M ${cwArcStart.x.toFixed(1)} ${cwArcStart.y.toFixed(1)} A ${R + 32} ${R + 32} 0 0 1 ${cwArcEnd.x.toFixed(1)} ${cwArcEnd.y.toFixed(1)}"
-            fill="none" stroke="#000000" stroke-width="1.2" marker-end="url(#ringArrow)" />
+            fill="none" stroke="var(--purple)" stroke-width="1.2" marker-end="url(#ringArrow)" />
       <text x="${cx}" y="${cy - R - 38}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">
         0x00000000 · CLOCKWISE SUCCESSOR LOOKUP
       </text>
@@ -1027,8 +1550,8 @@
 
     // Main Hash Space Circle
     parts.push(`
-      <circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="#000000" stroke-width="1.5" />
-      <circle cx="${cx}" cy="${cy}" r="${R - 22}" fill="none" stroke="#000000" stroke-width="0.5" stroke-dasharray="2,3" />
+      <circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="var(--line)" stroke-width="1.5" />
+      <circle cx="${cx}" cy="${cy}" r="${R - 22}" fill="none" stroke="var(--line)" stroke-width="0.5" stroke-dasharray="2,3" />
     `);
 
     // Plot all 300 Virtual Node positions around the ring
@@ -1049,14 +1572,14 @@
       const p1 = polarToXY(cx, cy, r1, ang);
       const p2 = polarToXY(cx, cy, r2, ang);
       parts.push(
-        `<line x1="${p1.x.toFixed(2)}" y1="${p1.y.toFixed(2)}" x2="${p2.x.toFixed(2)}" y2="${p2.y.toFixed(2)}" stroke="#000000" stroke-width="1" />`
+        `<line class="vnode-position vnode-node-${vn.nodeId}" x1="${p1.x.toFixed(2)}" y1="${p1.y.toFixed(2)}" x2="${p2.x.toFixed(2)}" y2="${p2.y.toFixed(2)}" stroke="var(--node-${vn.nodeId})" stroke-width="1" />`
       );
     }
 
     // Highlighted Clockwise Successor Search Arc from KeyHash to Successor VNode
     const arcPath = describeClockwiseArc(cx, cy, R + 16, routeRes.keyHash, routeRes.successor.hashPos);
     parts.push(`
-      <path d="${arcPath}" fill="none" stroke="#000000" stroke-width="2.5" stroke-dasharray="4,2" marker-end="url(#ringArrow)" />
+      <path class="successor-route-arc" d="${arcPath}" fill="none" stroke="var(--purple)" stroke-width="2.5" stroke-dasharray="4,2" marker-end="url(#ringArrow)" />
     `);
 
     // Key Hash Marker (Distinct Black-Outline Square + Radial Line)
@@ -1064,18 +1587,18 @@
     const keyPt = polarToXY(cx, cy, R, keyAng);
     const keyLabelPt = polarToXY(cx, cy, R + 24, keyAng);
     parts.push(`
-      <line x1="${cx}" y1="${cy}" x2="${keyPt.x.toFixed(2)}" y2="${keyPt.y.toFixed(2)}" stroke="#000000" stroke-width="1" stroke-dasharray="3,3" />
-      <rect x="${(keyPt.x - 6).toFixed(2)}" y="${(keyPt.y - 6).toFixed(2)}" width="12" height="12" fill="#FFFFFF" stroke="#000000" stroke-width="2.5" />
-      <circle cx="${keyPt.x.toFixed(2)}" cy="${keyPt.y.toFixed(2)}" r="2.5" fill="#000000" />
+      <line x1="${cx}" y1="${cy}" x2="${keyPt.x.toFixed(2)}" y2="${keyPt.y.toFixed(2)}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3,3" />
+      <rect x="${(keyPt.x - 6).toFixed(2)}" y="${(keyPt.y - 6).toFixed(2)}" width="12" height="12" fill="var(--surface)" stroke="var(--purple)" stroke-width="2.5" />
+      <circle cx="${keyPt.x.toFixed(2)}" cy="${keyPt.y.toFixed(2)}" r="2.5" fill="var(--purple)" />
     `);
 
     // Highlighted Successor Virtual Node Marker (Solid Black Circle + Outer Ring)
     const succAng = hashToAngleRad(routeRes.successor.hashPos);
     const succPt = polarToXY(cx, cy, R, succAng);
     parts.push(`
-      <line x1="${cx}" y1="${cy}" x2="${succPt.x.toFixed(2)}" y2="${succPt.y.toFixed(2)}" stroke="#000000" stroke-width="2" />
-      <circle cx="${succPt.x.toFixed(2)}" cy="${succPt.y.toFixed(2)}" r="8" fill="#FFFFFF" stroke="#000000" stroke-width="2.5" />
-      <circle cx="${succPt.x.toFixed(2)}" cy="${succPt.y.toFixed(2)}" r="4" fill="#000000" />
+      <line x1="${cx}" y1="${cy}" x2="${succPt.x.toFixed(2)}" y2="${succPt.y.toFixed(2)}" stroke="var(--purple)" stroke-width="2" />
+      <circle cx="${succPt.x.toFixed(2)}" cy="${succPt.y.toFixed(2)}" r="8" fill="var(--surface)" stroke="var(--purple)" stroke-width="2.5" />
+      <circle cx="${succPt.x.toFixed(2)}" cy="${succPt.y.toFixed(2)}" r="4" fill="var(--purple)" />
     `);
 
     // Three Physical Data Node Boxes arranged cleanly around the ring
@@ -1093,24 +1616,24 @@
       if (isTarget) {
         parts.push(`
           <line x1="${succPt.x.toFixed(1)}" y1="${succPt.y.toFixed(1)}" x2="${boxCx.toFixed(1)}" y2="${boxCy.toFixed(1)}"
-                stroke="#000000" stroke-width="2" marker-end="url(#ringArrow)" />
+                stroke="var(--purple)" stroke-width="2" marker-end="url(#ringArrow)" />
         `);
       }
 
       parts.push(`
-        <rect x="${pb.x}" y="${pb.y}" width="${pb.w}" height="${pb.h}"
-              fill="${isTarget ? '#000000' : '#FFFFFF'}"
-              stroke="#000000" stroke-width="${isTarget ? '2.5' : '1'}" />
+        <rect class="${isTarget ? 'ring-target-node' : ''}" x="${pb.x}" y="${pb.y}" width="${pb.w}" height="${pb.h}"
+                fill="${isTarget ? 'var(--purple-strong)' : 'var(--surface)'}"
+                stroke="var(--line)" stroke-width="${isTarget ? '2.5' : '1'}" />
         <text x="${pb.x + 10}" y="${pb.y + 20}" font-family="Proxima Nova, sans-serif" font-size="12" font-weight="700"
-              fill="${isTarget ? '#FFFFFF' : '#000000'}">${pb.label}</text>
+                fill="${isTarget ? '#FFFFFF' : 'var(--ink)'}">${pb.label}</text>
         <text x="${pb.x + 10}" y="${pb.y + 36}" font-family="JetBrains Mono, monospace" font-size="10"
-              fill="${isTarget ? '#FFFFFF' : '#000000'}">${pb.port}</text>
+                fill="${isTarget ? '#FFFFFF' : 'var(--muted)'}">${pb.port}</text>
       `);
     }
 
     // Center Readout Badge inside the Ring
     parts.push(`
-      <rect x="${cx - 102}" y="${cy - 44}" width="204" height="88" fill="#FFFFFF" stroke="#000000" stroke-width="1.5" />
+      <rect x="${cx - 102}" y="${cy - 44}" width="204" height="88" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5" />
       <text x="${cx}" y="${cy - 24}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">
         KEY: "${escapeHtml(key.length > 18 ? key.slice(0, 18) + '…' : key)}"
       </text>
@@ -1129,7 +1652,7 @@
     const calloutX = Math.max(60, Math.min(560, keyLabelPt.x));
     const calloutY = Math.max(25, Math.min(445, keyLabelPt.y));
     parts.push(`
-      <rect x="${(calloutX - 48).toFixed(1)}" y="${(calloutY - 10).toFixed(1)}" width="96" height="18" fill="#FFFFFF" stroke="#000000" stroke-width="1" />
+      <rect x="${(calloutX - 48).toFixed(1)}" y="${(calloutY - 10).toFixed(1)}" width="96" height="18" fill="var(--surface)" stroke="var(--line)" stroke-width="1" />
       <text x="${calloutX.toFixed(1)}" y="${(calloutY + 2).toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" font-weight="700">
         KEY @ ${keyDeg}°
       </text>
@@ -1177,10 +1700,10 @@
     const node = state.nodes[state.cacheSelectedNode];
     if (!node) return;
 
-    const mruKey = node.entries.length > 0 ? node.entries[0].key : '—';
-    const lruKey = node.entries.length > 0 ? node.entries[node.entries.length - 1].key : '—';
+    const mruKey = node.reportedMruKey ?? (node.entries.length > 0 ? node.entries[0].key : '—');
+    const lruKey = node.reportedLruKey ?? (node.entries.length > 0 ? node.entries[node.entries.length - 1].key : '—');
 
-    document.getElementById('lruMetricSize').textContent = String(node.entries.length);
+    document.getElementById('lruMetricSize').textContent = String(node.reportedSize ?? node.entries.length);
     document.getElementById('lruMetricCap').innerHTML = `${node.capacity} <small>(Demo)</small>`;
     document.getElementById('lruMetricMRU').textContent = mruKey;
     document.getElementById('lruMetricLRU').textContent = lruKey;
@@ -1212,7 +1735,7 @@
               : `NODE #${idx + 1}`;
 
           return `
-            <div class="dll-node-box ${isHead ? 'mru-node' : ''} ${isTail ? 'lru-node' : ''}">
+            <div class="dll-node-box ${isHead ? 'mru-node' : ''} ${isTail ? 'lru-node' : ''} ${isHead ? (state.cacheAnimation || '') : ''}">
               <div class="dll-node-role">
                 <span>${roleText}</span>
                 <span>${entry.addr}</span>
@@ -1237,6 +1760,13 @@
         <span class="dll-arrow">←</span>
         <div class="dll-pointer-badge">tail_</div>
       `;
+    }
+
+    if (state.cacheAnimation) {
+      const animation = state.cacheAnimation;
+      requestAnimationFrame(() => {
+        if (state.cacheAnimation === animation) state.cacheAnimation = null;
+      });
     }
 
     // 2. Render std::unordered_map<std::string, Node*> Table
@@ -1276,41 +1806,58 @@
 
     if (!key) return;
 
-    if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-      state.ws.send(
-        JSON.stringify({
-          type: 'execute_op',
-          directNodeId: node.nodeId,
-          op,
-          key,
-          value: val,
-        })
-      );
+    if (state.liveMode) {
+      state.lastCacheBanner = `LIVE ${op} ${key}: waiting for Data Node ${node.nodeId} response...`;
+      renderCacheEngineView();
+      const button = document.getElementById('cacheExecBtn');
+      button.disabled = true;
+      sendLiveOperation({
+        type: 'execute_op',
+        directNodeId: node.nodeId,
+        op,
+        key,
+        value: val,
+      }, (result, error) => {
+        button.disabled = false;
+        state.cacheAnimation = !error && result?.status === 0 && (op === 'PUT' || op === 'GET')
+          ? (op === 'GET' ? 'cache-promoted' : 'cache-inserted')
+          : null;
+        const status = result ? (result.status === 0 ? 'OK' : result.status === 1 ? 'NOT_FOUND' : 'ERROR') : 'ERROR';
+        state.lastCacheBanner = error
+          ? `LIVE ${op} failed: ${error}`
+          : `LIVE ${op} ${key} → ${status}: ${result.payload || '(empty payload)'}`;
+        renderCacheEngineView();
+      });
+      return;
     }
 
     if (op === 'PUT') {
       const outcome = node.put(key, val, false);
+      state.cacheAnimation = outcome.evicted ? 'cache-inserted cache-eviction' : 'cache-inserted';
       if (outcome.evicted) {
-        state.lastCacheBanner = `PUT("${key}", "${val}"): Capacity (${node.capacity}) reached → Evicted LRU TAIL "${outcome.evictedKey}" in O(1) and inserted "${key}" at HEAD`;
+        state.lastCacheBanner = `PUT("${key}", "${val}"): evicted LRU TAIL "${outcome.evictedKey}" (O(1) list unlink; average-case O(1) map erase) and inserted at HEAD.`;
       } else if (outcome.updated) {
-        state.lastCacheBanner = `PUT("${key}", "${val}"): Updated value in O(1) and promoted node to MRU HEAD`;
+        state.lastCacheBanner = `PUT("${key}", "${val}"): updated value and promoted to MRU HEAD (average-case O(1) map lookup; O(1) list move).`;
       } else {
-        state.lastCacheBanner = `PUT("${key}", "${val}"): Inserted new Node* at MRU HEAD and indexed in std::unordered_map in O(1)`;
+        state.lastCacheBanner = `PUT("${key}", "${val}"): inserted at MRU HEAD; map lookup/insertion is average-case O(1).`;
       }
     } else if (op === 'GET') {
       const outcome = node.get(key);
+      state.cacheAnimation = outcome.hit ? 'cache-promoted' : null;
       if (outcome.hit) {
-        state.lastCacheBanner = `GET("${key}") → HIT ("${outcome.value}"): Detached Node* and moved to MRU HEAD in O(1)`;
+        state.lastCacheBanner = `GET("${key}") → HIT ("${outcome.value}"): moved to MRU HEAD with O(1) list work under an exclusive lock.`;
       } else {
-        state.lastCacheBanner = `GET("${key}") → CACHE MISS: Key not found in std::unordered_map (O(1))`;
+        state.lastCacheBanner = `GET("${key}") → CACHE MISS: key not found (average-case O(1) map lookup).`;
       }
     } else if (op === 'DELETE') {
       const outcome = node.del(key, false);
+      state.cacheAnimation = null;
       state.lastCacheBanner = outcome.removed
-        ? `DELETE("${key}") → O(1) Detach from Doubly Linked List + std::unordered_map::erase`
+        ? `DELETE("${key}") → O(1) list unlink + average-case O(1) map erase`
         : `DELETE("${key}") → Key not found`;
     }
 
+    setRouteOutcome(state.lastCacheBanner);
     renderCacheEngineView();
     renderClusterNodeCards();
     renderWalRecoveryView();
@@ -1358,19 +1905,22 @@
 
     const stage6Text = document.getElementById('recStage6Text');
     const memBanner = document.getElementById('walRecoveryBannerText');
+    const recordTotal = state.liveMode ? node.walRecordCount : node.walRecords.length;
+    document.getElementById('walStepRecoveryBtn').disabled = state.recoveryPending;
+    document.getElementById('walRunRecoveryBtn').disabled = state.recoveryPending;
 
     if (state.recoveryStep === 1) {
       stage6Text.textContent = 'ONLINE';
       memBanner.textContent = 'STATE: ONLINE (SYNCHRONIZED WITH LOCAL WAL)';
     } else if (state.recoveryStep === 2) {
-      stage6Text.textContent = 'RESTARTING...';
-      memBanner.textContent = `STATE: SIMULATING NODE ${nodeId} PROCESS RESTART`;
+      stage6Text.textContent = state.recoveryPending ? 'CLEARING MEMORY...' : 'RESTART SIMULATED';
+      memBanner.textContent = `STATE: SIMULATING NODE ${nodeId} RESTART; NO PROCESS IS TERMINATED`;
     } else if (state.recoveryStep === 3) {
       stage6Text.textContent = 'RAM CLEARED';
       memBanner.textContent = 'STATE: VOLATILE IN-MEMORY CACHE CLEARED (0 ENTRIES)';
     } else if (state.recoveryStep === 4) {
-      stage6Text.textContent = `REPLAYING (${state.recoveryReplayedCount}/${node.walRecords.length})`;
-      memBanner.textContent = `STATE: REPLAYING ${node.walFile} SEQUENTIALLY (${state.recoveryReplayedCount} / ${node.walRecords.length} RECORDS)`;
+      stage6Text.textContent = state.recoveryPending ? 'REPLAYING LOCAL LOG...' : `REPLAYED ${state.recoveryReplayedCount}/${recordTotal}`;
+      memBanner.textContent = `STATE: ${state.recoveryPending ? 'REPLAYING' : 'REPLAYED'} ${node.walFile} (${state.recoveryReplayedCount} / ${recordTotal} RECORDS)`;
     } else if (state.recoveryStep === 5) {
       stage6Text.textContent = 'CACHE REBUILT';
       memBanner.textContent = `STATE: IN-MEMORY LRU RECONSTRUCTED (${node.entries.length} ENTRIES)`;
@@ -1387,7 +1937,7 @@
     } else {
       walTbody.innerHTML = node.walRecords
         .map((rec, idx) => {
-          let replayStatus = 'DURABLE ON DISK';
+          let replayStatus = state.liveMode ? 'LIVE LOG · STREAM FLUSHED' : 'SIMULATED LOG ENTRY';
           let isCurrentReplay = false;
           if (state.recoveryStep === 3) {
             replayStatus = 'PENDING REPLAY';
@@ -1462,7 +2012,8 @@
 
   function stepWalRecovery() {
     const node = state.nodes[state.walSelectedNode];
-    if (node.walRecords.length === 0) {
+    if (state.recoveryPending) return;
+    if (!state.liveMode && node.walRecords.length === 0) {
       node.put('acct:301', 'bal=4500', false);
       node.put('acct:302', 'bal=9200', false);
       node.put('acct:301', 'bal=5100', false);
@@ -1471,28 +2022,60 @@
     if (state.recoveryStep === 1 || state.recoveryStep >= 6) {
       state.recoveryStep = 2; // Step 2: Simulate Node Restart
     } else if (state.recoveryStep === 2) {
-      state.recoveryStep = 3; // Step 3: Clear In-Memory State
-      node.clearMemoryOnly();
-      state.recoveryReplayedCount = 0;
-      if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(JSON.stringify({ type: 'node_recover', nodeId: node.nodeId, stage: 'CLEAR_MEMORY' }));
+      if (state.liveMode) {
+        state.recoveryPending = true;
+        sendLiveOperation({ type: 'node_recover', nodeId: node.nodeId, stage: 'CLEAR_MEMORY' }, (result, error) => {
+          state.recoveryPending = false;
+          if (error || result?.status !== 0) {
+            state.recoveryAutoRun = false;
+            setRouteOutcome(`Live memory clear failed: ${error || result?.payload || 'node returned an error'}.`);
+          } else {
+            state.recoveryStep = 3;
+            state.recoveryReplayedCount = 0;
+            if (state.recoveryAutoRun) stepWalRecovery();
+          }
+          renderWalRecoveryView();
+          renderCacheEngineView();
+          renderClusterNodeCards();
+        });
+      } else {
+        state.recoveryStep = 3;
+        node.clearMemoryOnly();
+        state.recoveryReplayedCount = 0;
       }
     } else if (state.recoveryStep === 3) {
       state.recoveryStep = 4; // Step 4: Replay WAL Operations in Order
-      state.recoveryReplayedCount = 1;
-      node.replayWalUpTo(state.recoveryReplayedCount);
+      if (state.liveMode) {
+        state.recoveryPending = true;
+        sendLiveOperation({ type: 'node_recover', nodeId: node.nodeId, stage: 'REPLAY_WAL' }, (result, error) => {
+          state.recoveryPending = false;
+          if (error || result?.status !== 0) {
+            state.recoveryAutoRun = false;
+            setRouteOutcome(`Live WAL replay failed: ${error || result?.payload || 'node returned an error'}.`);
+          } else {
+            state.recoveryReplayedCount = node.walRecordCount;
+            state.recoveryStep = 5;
+            setRouteOutcome(`Data Node ${node.nodeId} rebuilt its in-memory cache by replaying ${node.walFile} (${node.walRecordCount} records).`);
+            if (state.recoveryAutoRun) stepWalRecovery();
+          }
+          renderWalRecoveryView();
+          renderCacheEngineView();
+          renderClusterNodeCards();
+        });
+      } else {
+        state.recoveryReplayedCount = 1;
+        node.replayWalUpTo(state.recoveryReplayedCount);
+      }
     } else if (state.recoveryStep === 4) {
-      if (state.recoveryReplayedCount < node.walRecords.length) {
+      if (!state.liveMode && state.recoveryReplayedCount < node.walRecords.length) {
         state.recoveryReplayedCount += 1;
         node.replayWalUpTo(state.recoveryReplayedCount);
-      } else {
+      } else if (!state.liveMode) {
         state.recoveryStep = 5; // Step 5: Show Reconstructed Cache
-        if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-          state.ws.send(JSON.stringify({ type: 'node_recover', nodeId: node.nodeId, stage: 'REPLAY_WAL' }));
-        }
       }
     } else if (state.recoveryStep === 5) {
       state.recoveryStep = 6; // Step 6: Mark Recovery Complete
+      state.recoveryAutoRun = false;
     }
 
     renderWalRecoveryView();
@@ -1507,7 +2090,7 @@
     }
 
     const node = state.nodes[state.walSelectedNode];
-    if (node.walRecords.length === 0) {
+    if (!state.liveMode && node.walRecords.length === 0) {
       node.put('acct:301', 'bal=4500', false);
       node.put('acct:302', 'bal=9200', false);
       node.put('acct:301', 'bal=5100', false);
@@ -1515,6 +2098,13 @@
 
     state.recoveryStep = 1;
     renderWalRecoveryView();
+
+    if (state.liveMode) {
+      state.recoveryAutoRun = true;
+      stepWalRecovery();
+      stepWalRecovery();
+      return;
+    }
 
     if (state.reducedMotion) {
       node.replayWalUpTo(node.walRecords.length);
@@ -1593,8 +2183,8 @@
       },
       metrics: {
         total_requests: totalReqs,
-        successful_ops: totalReqs,
-        failed_ops: 0,
+        successful_ops: null,
+        failed_ops: null,
         throughput_ops_sec: baseThroughput,
         p50_latency_ms: Number(baseP50.toFixed(3)),
         p90_latency_ms: Number((baseP50 * 1.75).toFixed(3)),
@@ -1607,6 +2197,7 @@
   }
 
   function applyBenchmarkReport(report, provenanceText) {
+    validateBenchmarkReport(report);
     const label =
       provenanceText ||
       (report.source === 'measured_python_load_tester'
@@ -1621,12 +2212,68 @@
       state.perfReports.single_node = report;
     }
 
+    state.productReport = report;
     renderPerformanceLab();
+    renderProductPerformance();
+  }
+
+  function validateBenchmarkReport(report) {
+    if (!report || typeof report !== 'object' || Array.isArray(report)) {
+      throw new Error('Expected a benchmark report object.');
+    }
+    if (!['coordinator', 'node_1', 'node_2', 'node_3'].includes(report.target_mode)) {
+      throw new Error('Unknown benchmark target.');
+    }
+    if (typeof report.endpoint !== 'string' || !report.endpoint.trim()) {
+      throw new Error('Missing benchmark endpoint.');
+    }
+    const config = report.config;
+    const metrics = report.metrics;
+    if (!config || !metrics || typeof config !== 'object' || typeof metrics !== 'object') {
+      throw new Error('Missing config or metrics object.');
+    }
+    const finite = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const workers = Number(config.workers);
+    if (!Number.isInteger(workers) || workers < 1 || workers > 200) {
+      throw new Error('Worker count must be an integer from 1 to 200.');
+    }
+    const mix = [config.get_pct, config.put_pct, config.delete_pct].map(Number);
+    if (!mix.every((value) => Number.isFinite(value) && value >= 0 && value <= 100) || Math.abs(mix.reduce((sum, value) => sum + value, 0) - 100) > 0.01) {
+      throw new Error('Workload percentages must be valid and sum to 100.');
+    }
+    for (const key of ['total_requests', 'throughput_ops_sec', 'p50_latency_ms', 'p90_latency_ms', 'p95_latency_ms', 'p99_latency_ms']) {
+      if (!finite(Number(metrics[key]))) throw new Error(`Invalid metric: ${key}.`);
+    }
+    if (metrics.successful_ops != null && !finite(Number(metrics.successful_ops))) {
+      throw new Error('Invalid metric: successful_ops.');
+    }
+    if (metrics.failed_ops != null && !finite(Number(metrics.failed_ops))) {
+      throw new Error('Invalid metric: failed_ops.');
+    }
+    if (report.source !== 'illustrative_simulation') {
+      if (metrics.successful_ops == null || metrics.failed_ops == null) {
+        throw new Error('Measured/imported reports must include successful_ops and failed_ops.');
+      }
+      if (Number(metrics.successful_ops) + Number(metrics.failed_ops) !== Number(metrics.total_requests)) {
+        throw new Error('Successful plus failed operations must equal total_requests.');
+      }
+    }
+    const distribution = report.node_distribution;
+    if (!distribution || !['node_1', 'node_2', 'node_3'].every((key) => finite(Number(distribution[key])))) {
+      throw new Error('Invalid per-node distribution.');
+    }
+    if (!Array.isArray(report.series) || report.series.length === 0 || report.series.some((point) =>
+      !point || !Number.isInteger(Number(point.bucket)) || !['ops_per_sec', 'p50_ms', 'p99_ms'].every((key) => finite(Number(point[key])))
+    )) {
+      throw new Error('Benchmark series is missing or invalid.');
+    }
+    return report;
   }
 
   function renderPerformanceLineChart(report) {
     const svg = document.getElementById('perfLineChartSvg');
     if (!svg || !report || !report.series || report.series.length === 0) return;
+    svg.setAttribute('aria-label', `${report.provenanceLabel}: throughput in operations per second and P50/P99 latency in milliseconds across benchmark windows.`);
 
     const series = report.series;
     const W = 560;
@@ -1654,7 +2301,7 @@
       const latVal = (maxLat * (1 - g / 4)).toFixed(2);
       out.push(`
         <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"
-              stroke="#000000" stroke-width="${g === 4 ? '1.5' : '0.4'}" ${g < 4 ? 'stroke-dasharray="2,3"' : ''} />
+              stroke="var(--line)" stroke-width="${g === 4 ? '1.5' : '0.4'}" ${g < 4 ? 'stroke-dasharray="2,3"' : ''} />
         <text x="${padL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="9">${opsVal}</text>
         <text x="${W - padR + 6}" y="${(y + 3).toFixed(1)}" text-anchor="start" font-family="JetBrains Mono, monospace" font-size="9">${latVal}ms</text>
       `);
@@ -1662,8 +2309,8 @@
 
     // Axes & Legend
     out.push(`
-      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#000000" stroke-width="1.2" />
-      <line x1="${W - padR}" y1="${padT}" x2="${W - padR}" y2="${padT + plotH}" stroke="#000000" stroke-width="1.2" />
+      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1.2" />
+      <line x1="${W - padR}" y1="${padT}" x2="${W - padR}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1.2" />
       <text x="${padL}" y="15" font-family="JetBrains Mono, monospace" font-size="9" font-weight="700">── THROUGHPUT (ops/s)</text>
       <text x="${padL + 165}" y="15" font-family="JetBrains Mono, monospace" font-size="9" font-weight="700">- - P99 LATENCY (ms)</text>
       <text x="${padL + 320}" y="15" font-family="JetBrains Mono, monospace" font-size="9" font-weight="700">··· P50 LATENCY (ms)</text>
@@ -1674,9 +2321,9 @@
     const p50Points = series.map((s, i) => `${xAt(i).toFixed(1)},${yLat(s.p50_ms).toFixed(1)}`).join(' ');
 
     out.push(`
-      <polyline points="${opsPoints}" fill="none" stroke="#000000" stroke-width="2" />
-      <polyline points="${p99Points}" fill="none" stroke="#000000" stroke-width="1.5" stroke-dasharray="5,3" />
-      <polyline points="${p50Points}" fill="none" stroke="#000000" stroke-width="1.5" stroke-dasharray="2,2" />
+      <polyline points="${opsPoints}" fill="none" stroke="var(--purple)" stroke-width="2" />
+      <polyline points="${p99Points}" fill="none" stroke="var(--node-3)" stroke-width="1.5" stroke-dasharray="5,3" />
+      <polyline points="${p50Points}" fill="none" stroke="var(--node-2)" stroke-width="1.5" stroke-dasharray="2,2" />
     `);
 
     series.forEach((s, i) => {
@@ -1684,8 +2331,8 @@
       const cyOps = yOps(s.ops_per_sec);
       const cyP99 = yLat(s.p99_ms);
       out.push(`
-        <circle cx="${cx.toFixed(1)}" cy="${cyOps.toFixed(1)}" r="3" fill="#000000" />
-        <rect x="${(cx - 2.5).toFixed(1)}" y="${(cyP99 - 2.5).toFixed(1)}" width="5" height="5" fill="#FFFFFF" stroke="#000000" stroke-width="1.5" />
+        <circle cx="${cx.toFixed(1)}" cy="${cyOps.toFixed(1)}" r="3" fill="var(--purple)" />
+        <rect x="${(cx - 2.5).toFixed(1)}" y="${(cyP99 - 2.5).toFixed(1)}" width="5" height="5" fill="var(--surface)" stroke="var(--node-3)" stroke-width="1.5" />
         <text x="${cx.toFixed(1)}" y="${H - 12}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9">W${s.bucket}</text>
       `);
     });
@@ -1696,6 +2343,7 @@
   function renderPerformanceBarChart(report) {
     const svg = document.getElementById('perfBarChartSvg');
     if (!svg || !report) return;
+    svg.setAttribute('aria-label', `${report.provenanceLabel}: request distribution by node and latency percentiles in milliseconds.`);
 
     const W = 560;
     const H = 250;
@@ -1709,10 +2357,10 @@
 
     const maxNodeCount = Math.max(nd.node_1 || 0, nd.node_2 || 0, nd.node_3 || 0, 10) * 1.2;
 
-    const p50 = m.p50_latency_ms || 0.4;
-    const p90 = m.p90_latency_ms || Number((p50 * 1.7).toFixed(3));
-    const p95 = m.p95_latency_ms || Number((p50 * 2.1).toFixed(3));
-    const p99 = m.p99_latency_ms || 1.2;
+    const p50 = m.p50_latency_ms ?? 0;
+    const p90 = m.p90_latency_ms;
+    const p95 = m.p95_latency_ms;
+    const p99 = m.p99_latency_ms;
     const maxPctLat = Math.max(p99, 0.5) * 1.25;
 
     let out = [];
@@ -1720,13 +2368,13 @@
     // Left Half: Per-Node Request Distribution Bars
     out.push(`
       <text x="20" y="18" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">A. PER-NODE REQUEST DISTRIBUTION</text>
-      <line x1="20" y1="210" x2="255" y2="210" stroke="#000000" stroke-width="1.5" />
+      <line x1="20" y1="210" x2="255" y2="210" stroke="var(--line)" stroke-width="1.5" />
     `);
 
     const nodeBars = [
-      { label: 'Node 1 (:8001)', count: nd.node_1 || 0, pct: n1Pct, fill: '#000000', textFill: '#000000' },
-      { label: 'Node 2 (:8002)', count: nd.node_2 || 0, pct: n2Pct, fill: '#FFFFFF', textFill: '#000000' },
-      { label: 'Node 3 (:8003)', count: nd.node_3 || 0, pct: n3Pct, fill: '#000000', textFill: '#000000' },
+      { label: 'Node 1 (:8001)', count: nd.node_1 || 0, pct: n1Pct, fill: 'var(--node-1)' },
+      { label: 'Node 2 (:8002)', count: nd.node_2 || 0, pct: n2Pct, fill: 'var(--node-2)' },
+      { label: 'Node 3 (:8003)', count: nd.node_3 || 0, pct: n3Pct, fill: 'var(--node-3)' },
     ];
 
     nodeBars.forEach((b, idx) => {
@@ -1734,7 +2382,7 @@
       const bh = Math.max(4, (b.count / maxNodeCount) * 155);
       const by = 210 - bh;
       out.push(`
-        <rect x="${bx}" y="${by.toFixed(1)}" width="46" height="${bh.toFixed(1)}" fill="${b.fill}" stroke="#000000" stroke-width="1.5" />
+        <rect x="${bx}" y="${by.toFixed(1)}" width="46" height="${bh.toFixed(1)}" fill="${b.fill}" stroke="var(--line)" stroke-width="1.5" />
         <text x="${bx + 23}" y="${(by - 14).toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" font-weight="700">${b.count}</text>
         <text x="${bx + 23}" y="${(by - 4).toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="8">(${b.pct}%)</text>
         <text x="${bx + 23}" y="226" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9">${b.label.split(' ')[0]} ${b.label.split(' ')[1]}</text>
@@ -1742,12 +2390,12 @@
     });
 
     // Divider between subcharts
-    out.push(`<line x1="275" y1="10" x2="275" y2="235" stroke="#000000" stroke-width="0.7" stroke-dasharray="3,3" />`);
+    out.push(`<line x1="275" y1="10" x2="275" y2="235" stroke="var(--line)" stroke-width="0.7" stroke-dasharray="3,3" />`);
 
     // Right Half: Latency Percentile Bars (P50, P90, P95, P99)
     out.push(`
       <text x="295" y="18" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">B. LATENCY PERCENTILES (ms)</text>
-      <line x1="295" y1="210" x2="545" y2="210" stroke="#000000" stroke-width="1.5" />
+      <line x1="295" y1="210" x2="545" y2="210" stroke="var(--line)" stroke-width="1.5" />
     `);
 
     const latBars = [
@@ -1764,7 +2412,7 @@
       const isTail = lb.label === 'P50' || lb.label === 'P99';
       out.push(`
         <rect x="${bx}" y="${by.toFixed(1)}" width="38" height="${bh.toFixed(1)}"
-              fill="${isTail ? '#000000' : '#FFFFFF'}" stroke="#000000" stroke-width="1.5" />
+              fill="${isTail ? 'var(--purple)' : 'var(--surface-soft)'}" stroke="var(--line)" stroke-width="1.5" />
         <text x="${bx + 19}" y="${(by - 6).toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" font-weight="700">${lb.val}ms</text>
         <text x="${bx + 19}" y="226" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" font-weight="${isTail ? '700' : '400'}">${lb.label}</text>
       `);
@@ -1792,12 +2440,13 @@
     document.getElementById('perfMetricTotal').textContent = Number(m.total_requests).toLocaleString();
     document.getElementById('perfMetricMixSub').textContent =
       `GET ${cfg.get_pct}% · PUT ${cfg.put_pct}% · DEL ${cfg.delete_pct}%`;
-    document.getElementById('perfMetricSuccess').textContent = Number(m.successful_ops).toLocaleString();
-    document.getElementById('perfMetricFailed').textContent = Number(m.failed_ops).toLocaleString();
+    document.getElementById('perfMetricSuccess').textContent = m.successful_ops == null ? 'Not measured' : Number(m.successful_ops).toLocaleString();
+    document.getElementById('perfMetricFailed').textContent = m.failed_ops == null ? 'Not measured' : Number(m.failed_ops).toLocaleString();
     document.getElementById('perfMetricThroughput').textContent = `${Number(m.throughput_ops_sec).toLocaleString()} ops/s`;
     document.getElementById('perfMetricWorkersSub').textContent = `${cfg.workers} concurrent workers`;
     document.getElementById('perfMetricP50').textContent = `${m.p50_latency_ms} ms`;
     document.getElementById('perfMetricP99').textContent = `${m.p99_latency_ms} ms`;
+    setRouteOutcome(`${activeReport.provenanceLabel} · ${activeReport.endpoint} · ${m.total_requests} requests · ${m.throughput_ops_sec} ops/s · P50 ${m.p50_latency_ms} ms · P99 ${m.p99_latency_ms} ms.`);
 
     renderPerformanceLineChart(activeReport);
     renderPerformanceBarChart(activeReport);
@@ -1822,7 +2471,7 @@
             <td class="mono">${rep.config.workers} threads</td>
             <td class="mono">${rep.config.get_pct}% / ${rep.config.put_pct}% / ${rep.config.delete_pct}%</td>
             <td class="mono">${Number(rep.metrics.total_requests).toLocaleString()}</td>
-            <td class="mono">${Number(rep.metrics.successful_ops).toLocaleString()} / ${rep.metrics.failed_ops}</td>
+            <td class="mono">${rep.metrics.successful_ops == null ? 'Not measured' : Number(rep.metrics.successful_ops).toLocaleString()} / ${rep.metrics.failed_ops == null ? 'Not measured' : Number(rep.metrics.failed_ops).toLocaleString()}</td>
             <td class="mono"><strong>${Number(rep.metrics.throughput_ops_sec).toLocaleString()} ops/s</strong></td>
             <td class="mono">${rep.metrics.p50_latency_ms} ms</td>
             <td class="mono">${rep.metrics.p99_latency_ms} ms</td>
@@ -1847,9 +2496,19 @@
       banner.textContent = `WORKLOAD VALIDATION: GET (${getPct}%) + PUT (${putPct}%) + DELETE (${delPct}%) = ${sum}%. Percentages must sum to 100%.`;
       return null;
     }
-    if (workers < 1 || workers > 500) {
+    if (!Number.isInteger(workers) || workers < 1 || workers > 200) {
       banner.hidden = false;
-      banner.textContent = 'WORKERS VALIDATION: Enter between 1 and 200 concurrent worker threads (50+ recommended for concurrency demonstration).';
+      banner.textContent = 'WORKERS VALIDATION: Enter an integer from 1 to 200 concurrent worker threads.';
+      return null;
+    }
+    if (!Number.isInteger(totalReqs) || totalReqs < 100 || totalReqs > 20000) {
+      banner.hidden = false;
+      banner.textContent = 'REQUEST VALIDATION: Enter an integer from 100 to 20,000 requests.';
+      return null;
+    }
+    if (![getPct, putPct, delPct].every((value) => Number.isFinite(value) && value >= 0 && value <= 100)) {
+      banner.hidden = false;
+      banner.textContent = 'WORKLOAD VALIDATION: Each percentage must be between 0 and 100.';
       return null;
     }
     banner.hidden = true;
@@ -1862,42 +2521,987 @@
     return { targetMode, getPct, putPct, delPct, workers, totalReqs };
   }
 
+  function productStatus(plan) {
+    const code = plan.statusHex.match(/0x([0-9A-F]{2})/i);
+    return code ? Number.parseInt(code[1], 16) : null;
+  }
+
+  function pauseLearningAnimation() {
+    if (learning.timer) {
+      clearInterval(learning.timer);
+      learning.timer = null;
+    }
+    const pauseButton = document.getElementById('learningPauseBtn');
+    if (pauseButton) pauseButton.disabled = true;
+  }
+
+  function tourResultSummary(result) {
+    if (result.status === 2 || result.status == null) return `Request failed: ${result.outcome}`;
+    if (result.op === 'PUT' && result.status === 0) return `Value stored on Data Node ${result.nodeId}.`;
+    if (result.op === 'GET' && result.status === 0) {
+      const value = result.response?.payload ?? result.outcome.match(/CACHE HIT: Value="([^"]*)"/)?.[1];
+      return value == null ? `Value found on Data Node ${result.nodeId}.` : `Value found: ${value}`;
+    }
+    if (result.op === 'GET') return `Key not found on Data Node ${result.nodeId}; this is a cache miss.`;
+    if (result.op === 'DELETE' && result.status === 0) return `Key deleted from Data Node ${result.nodeId}.`;
+    if (result.op === 'DELETE') return `Key not found on Data Node ${result.nodeId}; the DELETE was recorded.`;
+    return result.outcome;
+  }
+
+  function renderTour() {
+    const panel = document.getElementById('interactiveTour');
+    if (!panel) return;
+    panel.hidden = !tour.active;
+    if (!tour.active) return;
+
+    const stepIndex = Math.min(tour.step, tourSteps.length - 1);
+    const step = tourSteps[stepIndex];
+    const isComplete = tour.completed === tourSteps.length && stepIndex === tourSteps.length - 1;
+    const result = tour.results[stepIndex] || (stepIndex === tour.completed ? tour.attempt : null);
+    document.getElementById('tourProgress').textContent =
+      isComplete ? 'GUIDED TOUR · COMPLETE' : `GUIDED TOUR · STEP ${stepIndex + 1} OF ${tourSteps.length}`;
+    document.getElementById('tourTitle').textContent = isComplete ? 'You have completed the tour' : step.title;
+    document.getElementById('tourInstruction').textContent = isComplete
+      ? 'You stored, retrieved, deleted, and then missed the same key. Try another key or explore How it works.'
+      : step.instruction;
+    document.getElementById('tourExpected').textContent = step.expected;
+    document.getElementById('tourObserved').textContent = result
+      ? `${result.executionMode === 'live C++ response' ? 'Live result' : 'Simulated result'}: ${tourResultSummary(result)}${result.status === step.status ? '' : ` (status ${result.statusHex || 'ERROR'}; this step is not complete)`}`
+      : tour.completed > stepIndex
+      ? 'This step is complete.'
+      : 'No request has run for this step yet.';
+    const busy = Boolean(state.arch.running || state.arch.activePlan?.pending);
+    document.getElementById('tourPreviousBtn').disabled = busy || stepIndex === 0;
+    document.getElementById('tourNextBtn').disabled = busy || tour.completed <= stepIndex || stepIndex >= tourSteps.length - 1;
+    document.getElementById('tourRunStepBtn').hidden = tour.completed > stepIndex;
+    document.getElementById('tourRunStepBtn').textContent = `Run ${step.op}`;
+    document.getElementById('tourRunStepBtn').disabled = busy || tour.completed > stepIndex;
+    document.getElementById('tourSkipBtn').disabled = busy;
+    document.getElementById('tourFinishBtn').hidden = !isComplete;
+    document.getElementById('tourFinishBtn').disabled = busy;
+  }
+
+  function renderLearningAnimation() {
+    const scene = document.getElementById('learningScene');
+    if (!scene) return;
+    const key = document.getElementById('demoKey')?.value.trim() || state.arch.key;
+    const route = hashRing.route(key);
+    const routeNode = route.physical.nodeId;
+    const nodeId = learning.crashedNodeId || routeNode;
+    const node = state.nodes[nodeId];
+    const cacheSize = state.liveMode ? Number(node.reportedSize || 0) : node.entries.length;
+    const roles = [...scene.querySelectorAll('[data-learning-role]')];
+    const links = [...scene.querySelectorAll('[data-learning-link]')];
+    const caption = document.getElementById('learningCaption');
+    const visualState = document.getElementById('learningState');
+    const source = state.liveMode ? 'LIVE C++ SNAPSHOT' : 'BROWSER SIMULATION';
+    document.getElementById('learningSource').textContent = source;
+    document.getElementById('learningRecoveryControls').hidden = learning.mode !== 'wal';
+    document.getElementById('learningRecoveryStatus').textContent = learning.recoveryMessage;
+    document.getElementById('simulateCrashBtn').disabled = state.liveMode || learning.crashedNodeId !== null;
+    document.getElementById('simulateRecoveryBtn').disabled = state.liveMode || learning.crashedNodeId === null;
+    document.getElementById('learningNodeLabel').textContent = `Data Node ${nodeId}`;
+    document.getElementById('learningNodeDetail').textContent = state.liveMode
+      ? `${cacheSize} cache entries`
+      : `${cacheSize}/${node.capacity} cache entries`;
+
+    roles.forEach((element) => {
+      element.classList.remove('is-active', 'is-complete');
+    });
+    links.forEach((element) => {
+      element.classList.remove('is-active', 'is-complete');
+      element.textContent = learning.mode === 'route' && learning.step === 4 ? '←' : '→';
+    });
+    visualState.replaceChildren();
+
+    if (learning.mode === 'route') {
+      const responseReturning = learning.step === 4;
+      const labels = [
+        ['Your app', responseReturning ? 'Receives response' : 'Sends request'],
+        ['Coordinator', responseReturning ? 'Returns response' : 'Hashes the key'],
+        ['Hash ring', `${route.successor.label}${route.wrapped ? ' · wraps' : ''}`],
+        [`Data Node ${routeNode}`, responseReturning ? 'Sends result' : 'Handles the request'],
+      ];
+      roles.forEach((element, index) => {
+        element.querySelector('strong').textContent = labels[index][0];
+        element.querySelector('span').textContent = labels[index][1];
+        if (responseReturning) {
+          element.classList.add(index < 2 ? 'is-active' : 'is-complete');
+        } else if (learning.step >= index) {
+          element.classList.add(learning.step === index ? 'is-active' : 'is-complete');
+        }
+      });
+      links.forEach((element, index) => {
+        if (responseReturning) element.classList.add('is-active');
+        else if (learning.step > index) element.classList.add('is-complete');
+        else if (learning.step === index) element.classList.add('is-active');
+      });
+      const stage = learning.step < 0
+        ? 'Ready to trace the request.'
+        : [
+          'The client sends the selected operation and key.',
+          `The coordinator hashes “${key}” with the system hash algorithm.`,
+          `The key hash ${toHex32(route.keyHash)} selects the next clockwise virtual node, ${route.successor.label}.`,
+          `Data Node ${routeNode} handles the request.`,
+          `The response travels back through the coordinator to your app.`,
+        ][learning.step];
+      caption.textContent = `${stage} Route is computed from the current key and the real demo ring.`;
+      visualState.textContent = `${key} · ${toHex32(route.keyHash)} → ${route.successor.label} → Data Node ${routeNode}`;
+    } else if (learning.mode === 'lru') {
+      roles.forEach((element, index) => {
+        const labels = [
+          ['Recent request', 'Uses the selected key'],
+          ['Coordinator', 'Selects one node'],
+          ['LRU order', 'MRU → LRU'],
+          [`Data Node ${nodeId}`, `${cacheSize}/${node.capacity} entries`],
+        ];
+        element.querySelector('strong').textContent = labels[index][0];
+        element.querySelector('span').textContent = labels[index][1];
+        if (index === 3) element.classList.add('is-active');
+        else if (learning.step >= index) element.classList.add(learning.step === index ? 'is-active' : 'is-complete');
+      });
+      const event = state.arch.productHistory.find((item) => item.nodeId === nodeId);
+      let messages = [
+        'No cache operation has run yet. Use Playground to create an actual cache event.',
+        `The selected node currently has ${cacheSize} of ${node.capacity} entries.`,
+        'A successful GET promotes the found key; a full-cache PUT can evict the LRU entry.',
+        'The list below is the selected node’s actual cache order, most recent first.',
+      ];
+      if (event?.op === 'GET' && event.status === 0) {
+        messages = [
+          `GET for “${event.key}” reaches Data Node ${nodeId}.`,
+          `The actual lookup found “${event.key}”.`,
+          `The successful GET promoted “${event.key}” to MRU.`,
+          'The list below is the node’s actual current order.',
+        ];
+      } else if (event?.op === 'PUT' && event.status === 0) {
+        const evicted = event.outcome.match(/Evicted LRU Tail "([^"]+)"/);
+        messages = evicted
+          ? [
+            `PUT for “${event.key}” reached a full cache on Data Node ${nodeId}.`,
+            'The new entry was inserted at the MRU end.',
+            `The actual LRU entry “${evicted[1]}” was evicted.`,
+            'The list below is the resulting actual cache order.',
+          ]
+          : [
+            `PUT for “${event.key}” reached Data Node ${nodeId}.`,
+            'No capacity eviction was reported for this insertion.',
+            `The actual cache contains “${event.key}”.`,
+            'The list below is the resulting actual cache order.',
+          ];
+      } else if (event?.op === 'GET') {
+        messages = [
+          `GET for “${event.key}” reached Data Node ${nodeId}.`,
+          'The actual lookup returned not found.',
+          'A cache miss does not promote an entry or change the LRU order.',
+          'The list below is the node’s actual current order.',
+        ];
+      } else if (event?.op === 'DELETE') {
+        messages = event.status === 0
+          ? [
+            `DELETE for “${event.key}” reached Data Node ${nodeId}.`,
+            'The node recorded the mutation before changing memory.',
+            `“${event.key}” was removed from the cache.`,
+            'The list below is the remaining actual cache order.',
+          ]
+          : [
+            `DELETE for “${event.key}” reached Data Node ${nodeId}.`,
+            'The node recorded the DELETE; the key was already absent.',
+            'The cache order is unchanged.',
+            'The list below is the node’s actual current order.',
+          ];
+      }
+      caption.textContent = `${messages[Math.max(0, learning.step)]} Step controls explain the observed state; they do not mutate the cache.`;
+      const lruEntries = node.entries.slice(0, 6);
+      visualState.innerHTML = lruEntries.length
+        ? `MRU → LRU${state.liveMode && cacheSize > lruEntries.length ? ` · first ${lruEntries.length} shown` : ''}<br>${lruEntries.map((entry, index) => `<span class="dc-learning-entry${index === 0 && learning.step >= 2 && event?.op === 'GET' && event.status === 0 ? ' is-promoted' : ''}">${index + 1}. ${escapeHtml(entry.key)}</span>`).join('')}${cacheSize > lruEntries.length ? `<span class="dc-learning-entry">… ${cacheSize - lruEntries.length} more</span>` : ''}`
+        : cacheSize > 0
+        ? `${cacheSize} entries are reported, but their keys are not in the available snapshot.`
+        : 'The selected node’s cache is empty.';
+    } else {
+      const relevantEvent = state.arch.productHistory.find((item) =>
+        item.nodeId === nodeId && (item.op === 'PUT' || item.op === 'DELETE'),
+      );
+      const record = relevantEvent && [...node.walRecords].reverse().find((item) =>
+        item.op === relevantEvent.op && item.key === relevantEvent.key,
+      );
+      const steps = record ? [
+        `The node receives ${record.op} for “${record.key}”.`,
+        `It appends WAL record #${record.seq} and flushes the C++ output stream.`,
+        record.op === 'PUT'
+          ? 'After the log append succeeds, the node updates its in-memory LRU cache.'
+          : relevantEvent.status === 0
+          ? 'After the log append succeeds, the node removes the key from memory.'
+          : 'The DELETE record is logged; the key was absent, so memory stays unchanged.',
+        relevantEvent.status === 0 ? 'The node returns success to the coordinator.' : 'The node returns NOT_FOUND to the coordinator.',
+      ] : [
+        'A PUT or DELETE reaches its data node.',
+        'The node appends a record and flushes its C++ stream (not fsync).',
+        'The node applies the mutation to its in-memory cache.',
+        'The node acknowledges the actual operation result.',
+      ];
+      const labels = [
+        ['Mutation', 'PUT or DELETE'],
+        ['Local WAL', record ? `Record #${record.seq}` : 'Append + stream flush'],
+        ['Cache memory', 'In-memory LRU'],
+        ['Response', 'Result returned'],
+      ];
+      roles.forEach((element, index) => {
+        element.querySelector('strong').textContent = labels[index][0];
+        element.querySelector('span').textContent = labels[index][1];
+        if (learning.step >= index) element.classList.add(learning.step === index ? 'is-active' : 'is-complete');
+      });
+      caption.textContent = record
+        ? `${steps[Math.max(0, learning.step)]} Stream flush is not an fsync power-loss guarantee.`
+        : `The list below shows actual local log records. ${steps[Math.max(0, learning.step)]}`;
+      const walSize = state.liveMode ? Number(node.walRecordCount || 0) : node.walRecords.length;
+      visualState.innerHTML = node.walRecords.length
+        ? `LOCAL LOG · ${walSize} record${walSize === 1 ? '' : 's'}<br>${node.walRecords.slice(-4).reverse().map((item) => `<span class="dc-learning-entry">#${item.seq} ${escapeHtml(item.op)} ${escapeHtml(item.key)}</span>`).join('')}`
+        : walSize > 0
+        ? `LOCAL LOG · ${walSize} records · record details are not available in this snapshot.`
+        : 'This selected node has no log records.';
+    }
+
+    const maxStep = learning.mode === 'route' ? 4 : 3;
+    document.getElementById('learningProgress').textContent =
+      learning.step < 0 ? 'Ready' : `Step ${learning.step + 1} of ${maxStep + 1}`;
+    document.getElementById('learningRunBtn').disabled = learning.timer !== null;
+    document.getElementById('learningStepBtn').disabled = learning.timer !== null || learning.step >= maxStep;
+    document.getElementById('learningPauseBtn').disabled = learning.timer === null;
+  }
+
+  function advanceLearningAnimation() {
+    const maxStep = learning.mode === 'route' ? 4 : 3;
+    learning.step = Math.min(maxStep, learning.step + 1);
+    renderLearningAnimation();
+    if (learning.step >= maxStep) pauseLearningAnimation();
+  }
+
+  function startInteractiveTour() {
+    if (state.arch.activePlan?.pending) return;
+    navigateToRoute('/playground');
+    if (!state.liveMode) document.getElementById('demoResetBtn').click();
+    const keyInput = document.getElementById('demoKey');
+    const valueInput = document.getElementById('demoValue');
+    keyInput.value = 'session:4092';
+    valueInput.value = 'user=8810';
+    state.arch.key = keyInput.value;
+    state.arch.val = valueInput.value;
+    document.getElementById('archKeyInput').value = keyInput.value;
+    document.getElementById('archValInput').value = valueInput.value;
+    tour.active = true;
+    tour.step = 0;
+    tour.completed = 0;
+    tour.key = keyInput.value;
+    tour.results = [];
+    tour.attempt = null;
+    state.arch.op = tourSteps[0].op;
+    resetArchFlow();
+    state.arch.productLastResult = null;
+    renderProductExperience();
+    document.getElementById('tourRunStepBtn').focus();
+  }
+
+  function finishInteractiveTour(skipped) {
+    tour.active = false;
+    try {
+      localStorage.setItem('discache-tour-state', skipped ? 'skipped' : 'finished');
+    } catch (_) {}
+    renderProductExperience();
+  }
+
+  function recordProductOperation(plan) {
+    if (!plan || plan.productRecorded || plan.pending || !plan.executionOutcomeText) return;
+    plan.productRecorded = true;
+    const status = productStatus(plan);
+    const result = {
+      op: plan.op,
+      key: plan.key,
+      value: plan.val,
+      nodeId: plan.response?.nodeId || plan.targetNodeId,
+      expectedNodeId: plan.targetNodeId,
+      status,
+      statusHex: plan.statusHex,
+      outcome: plan.executionOutcomeText,
+      response: plan.response || null,
+      routeMatches: plan.routeMatches,
+      executionMode: plan.liveExecution ? 'live C++ response' : 'deterministic browser simulation',
+    };
+    state.arch.productLastResult = result;
+    state.arch.productHistory.unshift(result);
+    state.arch.productHistory = state.arch.productHistory.slice(0, 6);
+
+    const expected = ['PUT', 'GET', 'DELETE', 'GET'][state.arch.productSequenceIndex];
+    const expectedStatus = [0, 0, 0, 1][state.arch.productSequenceIndex];
+    const sampleKey = document.getElementById('demoKey').value.trim();
+    if (state.arch.productSequenceIndex < 4 && result.routeMatches !== false && plan.key === sampleKey && plan.op === expected && status === expectedStatus) {
+      state.arch.productSequenceIndex++;
+    }
+    if (tour.active && tour.completed < tourSteps.length) {
+      const tourStep = tourSteps[tour.completed];
+      if (plan.key === tour.key && plan.op === tourStep.op) tour.attempt = result;
+      if (result.routeMatches !== false && plan.key === tour.key && plan.op === tourStep.op && status === tourStep.status) {
+        tour.results[tour.completed] = result;
+        tour.attempt = null;
+        tour.completed++;
+        tour.step = Math.min(tour.completed, tourSteps.length - 1);
+      }
+    }
+    renderProductExperience();
+  }
+
+  function renderProductHashRing(route) {
+    const svg = document.getElementById('productHashRing');
+    if (!svg || !route) return;
+    const cx = 120;
+    const cy = 80;
+    const radius = 48;
+    const point = (hash, r) => polarToXY(cx, cy, r, hashToAngleRad(hash));
+    const marks = hashRing.vnodes.map((vnode) => {
+      const inner = point(vnode.hashPos, radius - 2);
+      const outer = point(vnode.hashPos, radius + 2);
+      const color = vnode.nodeId === 1 ? 'var(--dc-node-1)' : vnode.nodeId === 2 ? 'var(--dc-node-2)' : 'var(--dc-node-3)';
+      return `<line x1="${inner.x.toFixed(1)}" y1="${inner.y.toFixed(1)}" x2="${outer.x.toFixed(1)}" y2="${outer.y.toFixed(1)}" stroke="${color}" stroke-width="1"/>`;
+    });
+    const keyPoint = point(route.keyHash, radius);
+    const vnodePoint = point(route.successor.hashPos, radius);
+    const keyPath = describeClockwiseArc(cx, cy, radius + 8, route.keyHash, route.successor.hashPos);
+    svg.innerHTML = `
+      <circle cx="${cx}" cy="${cy}" r="${radius}" fill="none" stroke="var(--dc-border-strong)" stroke-width="1"/>
+      ${marks.join('')}
+      <path d="${keyPath}" fill="none" stroke="var(--dc-purple)" stroke-width="1.5" stroke-dasharray="3 2"/>
+      <circle cx="${keyPoint.x.toFixed(1)}" cy="${keyPoint.y.toFixed(1)}" r="3.5" fill="var(--dc-purple)"/>
+      <circle cx="${vnodePoint.x.toFixed(1)}" cy="${vnodePoint.y.toFixed(1)}" r="4" fill="var(--dc-surface)" stroke="var(--dc-purple)" stroke-width="2"/>
+      <text x="${cx}" y="${cy - 5}" text-anchor="middle" fill="var(--dc-text)" font-size="8" font-family="var(--dc-mono)">KEY</text>
+      <text x="${cx}" y="${cy + 8}" text-anchor="middle" fill="var(--dc-muted)" font-size="7" font-family="var(--dc-mono)">${toHex32(route.keyHash)}</text>
+      <text x="${cx}" y="154" text-anchor="middle" fill="var(--dc-muted)" font-size="8">clockwise → successor</text>
+    `;
+  }
+
+  function renderProductExperience() {
+    const keyInput = document.getElementById('demoKey');
+    if (!keyInput) return;
+    if (tour.active && !state.arch.activePlan?.pending) {
+      state.arch.op = tourSteps[Math.min(tour.step, tourSteps.length - 1)].op;
+      document.querySelectorAll('[data-demo-op]').forEach((button) => {
+        const active = button.dataset.demoOp === state.arch.op;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+    }
+    const key = keyInput.value.trim();
+    const valueInput = document.getElementById('demoValue');
+    const selectedRoute = key ? hashRing.route(key) : null;
+    const activePlan = state.arch.activePlan;
+    const plan = activePlan && state.arch.currentStage > 0 ? activePlan : null;
+    const result = state.arch.productLastResult;
+    const running = Boolean(plan && (plan.pending || (state.arch.currentStage < state.arch.maxStage && !result)));
+
+    document.getElementById('demoModeLabel').textContent = state.liveMode ? 'LIVE C++ CLUSTER' : 'SIMULATED';
+    document.getElementById('demoModePill').textContent = state.liveMode ? 'LIVE C++' : 'SIMULATED';
+    document.getElementById('demoDataSource').textContent = state.liveMode ? 'Live C++ cluster snapshot' : 'Browser simulation';
+    document.getElementById('demoSequenceProgress').textContent = `${state.arch.productSequenceIndex} / 4 complete`;
+    document.getElementById('demoRunBtn').textContent = state.arch.running
+      ? 'Pause'
+      : plan && state.arch.currentStage < state.arch.maxStage
+      ? 'Continue'
+      : `Run ${state.arch.op}`;
+    document.getElementById('demoRunBtn').disabled = Boolean(plan && plan.pending);
+    document.getElementById('demoStepBtn').disabled = Boolean(plan && plan.pending);
+    document.getElementById('demoResetBtn').disabled = Boolean(plan && plan.pending);
+    document.getElementById('demoStageLabel').textContent = plan
+      ? ['Preparing', 'Hashing key', 'Finding node', 'Routing request', 'Updating cache', 'Response returned'][Math.max(0, state.arch.currentStage - 1)]
+      : 'Ready';
+    const stage = plan ? state.arch.currentStage : 0;
+    const visibleStage = stage === 0 ? 'Ready' : `${stage >= 6 ? 4 : stage < 3 ? stage : stage < 5 ? 2 : 3} / 4`;
+    document.getElementById('demoStageCount').textContent = visibleStage;
+    document.getElementById('demoKey').disabled = Boolean(plan && plan.pending);
+    document.getElementById('demoValue').disabled = state.arch.op !== 'PUT' || Boolean(plan && plan.pending) || tour.active;
+    document.querySelectorAll('[data-demo-op]').forEach((button) => {
+      button.disabled = Boolean(plan && plan.pending) || tour.active;
+    });
+    document.getElementById('demoKey').disabled = Boolean(plan && plan.pending) || tour.active;
+    document.getElementById('operationHelp').textContent = {
+      PUT: 'PUT stores or replaces this value on the key’s assigned node. Requires a key and value.',
+      GET: 'GET looks up a required key on its assigned node. A hit returns the value and makes it most recently used; a miss leaves the cache unchanged.',
+      DELETE: 'DELETE removes a required key from its assigned node. The node logs the mutation before changing memory; a missing key returns not found.',
+    }[state.arch.op];
+    const activeSegments = stage === 0 ? 0 : stage >= 6 ? 4 : stage < 3 ? 1 : stage < 5 ? 2 : 3;
+    document.querySelectorAll('#demoStageTrack i').forEach((segment, index) => {
+      segment.classList.toggle('is-complete', index < activeSegments);
+    });
+
+    const activeNodeId = plan && stage >= 3 ? plan.targetNodeId : null;
+    document.querySelectorAll('[data-node-id]').forEach((node) => {
+      node.classList.toggle('is-active-path', activeNodeId !== null && Number(node.dataset.nodeId) === activeNodeId);
+    });
+
+    for (const nodeId of [1, 2, 3]) {
+      const node = state.nodes[nodeId];
+      const entries = node.entries.slice(0, 3);
+      const preview = entries.length
+        ? entries.map((entry) => `${escapeHtml(entry.key)} = ${escapeHtml(entry.value)}`).join(' · ')
+        : 'Empty cache';
+      document.getElementById(`demoNodeMeta${nodeId}`).textContent =
+        `${state.liveMode ? Number(node.reportedSize || 0) : node.entries.length} entries`;
+      document.getElementById(`demoNodeCache${nodeId}`).innerHTML = preview;
+    }
+
+    const currentOp = plan ? plan.op : state.arch.op;
+    const currentKey = plan ? plan.key : key;
+    document.getElementById('demoResultOperation').textContent = result && !running ? result.op : plan ? plan.op : '—';
+    document.getElementById('demoResultKey').textContent = result && !running ? result.key : currentKey || '—';
+    document.getElementById('demoResultNode').textContent = result && !running
+      ? `Data Node ${result.nodeId}`
+      : plan && stage >= 3
+      ? `Data Node ${plan.targetNodeId}`
+      : '—';
+
+    let title = 'Ready when you are';
+    let message = `Run PUT to store ${key ? `"${key}"` : 'a key'} on its assigned node.`;
+    let change = 'No changes yet';
+    let statusState = 'ready';
+    let statusLabel = 'READY';
+    let statusCode = null;
+    let resultNode = selectedRoute && key ? `Data Node ${selectedRoute.physical.nodeId}` : '—';
+
+    if (running && plan) {
+      title = `Running ${plan.op}`;
+      message = `Routing "${plan.key}" to Data Node ${plan.targetNodeId}…`;
+      change = 'Request in progress';
+      resultNode = `Data Node ${plan.targetNodeId}`;
+      statusLabel = 'IN PROGRESS';
+    } else if (result) {
+      statusCode = result.status;
+      resultNode = `Data Node ${result.nodeId}`;
+      if (result.op === 'RECOVERY') {
+        title = result.statusLabel;
+        message = result.outcome;
+        change = 'Local cache replayed';
+        statusState = 'success';
+        statusLabel = state.liveMode ? 'LIVE ACTION' : 'SIMULATED';
+      } else if (result.status === 2 || result.status == null) {
+        title = 'Request failed';
+        message = result.outcome;
+        change = 'No confirmed cache change';
+        statusState = 'error';
+        statusLabel = 'ERROR';
+      } else if (result.op === 'PUT') {
+        title = 'Value stored';
+        message = `Stored "${result.key}" on Data Node ${result.nodeId}.`;
+        const evicted = result.outcome.match(/Evicted LRU Tail "([^"]+)"/);
+        change = evicted
+          ? `WAL recorded · evicted ${evicted[1]}`
+          : `WAL recorded · ${state.liveMode ? 'cache updated' : 'added to MRU'}`;
+        statusState = 'success';
+        statusLabel = 'STORED';
+      } else if (result.op === 'GET' && result.status === 0) {
+        title = 'Value found';
+        const cached = state.nodes[result.nodeId].entryMap.get(result.key);
+        const foundValue = result.response ? result.response.payload : cached?.value;
+        message = foundValue == null ? `Value found for "${result.key}".` : `Value found: ${foundValue}`;
+        change = 'Promoted to most recently used · no log write';
+        statusState = 'success';
+        statusLabel = 'FOUND';
+      } else if (result.op === 'GET') {
+        title = 'Key not found';
+        message = `"${result.key}" is not in Data Node ${result.nodeId}'s cache.`;
+        change = 'Cache unchanged · no log write';
+        statusState = 'ready';
+        statusLabel = 'CACHE MISS';
+      } else if (result.op === 'DELETE' && result.status === 0) {
+        title = 'Key deleted';
+        message = `Removed "${result.key}" from Data Node ${result.nodeId}.`;
+        change = `WAL recorded · removed from cache`;
+        statusState = 'success';
+        statusLabel = 'DELETED';
+      } else if (result.op === 'DELETE') {
+        title = 'Key not found';
+        message = `"${result.key}" was not in Data Node ${result.nodeId}'s cache.`;
+        change = 'Delete recorded · cache was unchanged';
+        statusState = 'ready';
+        statusLabel = 'NOT FOUND';
+      }
+      if (result.routeMatches === false) {
+        message += ` Live response came from Data Node ${result.nodeId}; expected Data Node ${result.expectedNodeId}.`;
+        statusState = 'error';
+        statusLabel = 'ROUTE MISMATCH';
+      }
+    }
+
+    document.getElementById('demoResultTitle').textContent = title;
+    document.getElementById('demoResultMessage').textContent = message;
+    document.getElementById('demoResultChange').textContent = change;
+    document.getElementById('demoResultNode').textContent = resultNode;
+    const indicator = document.getElementById('demoResultIndicator');
+    indicator.textContent = statusLabel;
+    indicator.dataset.state = statusState;
+    document.getElementById('demoStageTrack').setAttribute('aria-label', `Request path: ${document.getElementById('demoStageLabel').textContent}`);
+
+    const codeName = statusCode === 0 ? 'OK' : statusCode === 1 ? 'NOT_FOUND' : statusCode === 2 ? 'ERROR' : 'not sent';
+    const requestOp = plan || result;
+    const requestKey = requestOp ? requestOp.key : key;
+    const requestValue = requestOp ? (requestOp.val ?? requestOp.value ?? valueInput.value) : valueInput.value;
+    const op = requestOp ? requestOp.op : currentOp;
+    const opCode = op === 'PUT' ? '0x02' : op === 'DELETE' ? '0x03' : '0x01';
+    const keyLength = new TextEncoder().encode(requestKey || '').length;
+    const valueLength = op === 'PUT' ? new TextEncoder().encode(requestValue || '').length : 0;
+    document.getElementById('demoPacketInspector').textContent = result?.op === 'RECOVERY'
+      ? `Execution: simulated recovery\nAction: replayed ${state.nodes[result.nodeId].walRecords.length} local WAL records into volatile cache memory.\nNo network request or durability claim.`
+      : plan || result
+      ? `Execution: ${result?.executionMode || (state.liveMode ? 'live C++ response' : 'deterministic browser simulation')}\nRequest: magic 0xDC · opcode ${opCode} (${op})\nKey length: ${keyLength} UTF-8 bytes · value length: ${valueLength} UTF-8 bytes\nRoute: ${selectedRoute ? toHex32(selectedRoute.keyHash) : '—'} → ${selectedRoute ? selectedRoute.successor.label : '—'}\nExpected destination: ${plan ? `Data Node ${plan.targetNodeId}` : result ? `Data Node ${result.expectedNodeId || result.nodeId}` : '—'}\nActual response node: ${result && result.response ? result.response.nodeId : result?.status === 2 ? 'no response' : result ? result.nodeId : 'pending'}\nResponse status: ${statusCode == null ? 'pending' : `0x${statusCode.toString(16).padStart(2, '0').toUpperCase()} (${codeName})`}${result && result.response ? `\nResponse key hash: ${toHex32(result.response.keyHash)} · vnode hash: ${toHex32(result.response.vnodeHash)}\nResponse payload: ${result.response.payload || '(empty)'}` : ''}`
+      : 'No request has been sent.';
+
+    const events = state.arch.productHistory;
+    document.getElementById('demoEventList').innerHTML = events.length
+      ? events.map((event) => {
+        const label = event.routeMatches === false
+          ? 'Route mismatch'
+          : event.op === 'RECOVERY'
+          ? 'Local log replayed'
+          : event.status === 0
+          ? event.op === 'PUT' ? 'Value stored' : event.op === 'DELETE' ? 'Key deleted' : 'Value found'
+          : event.status === 1 ? 'Key not found' : 'Request failed';
+        return `<li><strong>${escapeHtml(event.op)} · ${escapeHtml(event.key)}</strong><span>${escapeHtml(label)} · Node ${event.nodeId}</span></li>`;
+      }).join('')
+      : '<li class="dc-event-empty">Your request results will appear here.</li>';
+
+    if (selectedRoute) {
+      document.getElementById('howRouteSummary').textContent =
+        `${toHex32(selectedRoute.keyHash)} → next clockwise virtual node ${selectedRoute.successor.label} → Data Node ${selectedRoute.physical.nodeId}.`;
+      document.getElementById('howHashValues').textContent =
+        `key ${toHex32(selectedRoute.keyHash)} · successor ${toHex32(selectedRoute.successor.hashPos)}${selectedRoute.wrapped ? ' · wraps to ring start' : ''}`;
+      renderProductHashRing(selectedRoute);
+      const node = state.nodes[selectedRoute.physical.nodeId];
+      const lru = node.entries.slice(0, 6);
+      document.getElementById('howLruList').innerHTML = lru.length
+        ? lru.map((entry, index) => `<li><span>${index === 0 ? 'Most recent' : index === lru.length - 1 ? 'Least recent' : `Position ${index + 1}`}</span><strong>${escapeHtml(entry.key)}</strong></li>`).join('')
+        : state.liveMode && Number(node.reportedSize || 0) > 0
+        ? '<li>Entries exist, but are not in the available inspection preview.</li>'
+        : '<li>Cache entries appear after a PUT.</li>';
+      const currentValue = node.entryMap.get(key)?.value;
+      document.getElementById('howWalMemory').textContent = currentValue == null
+        ? state.liveMode && Number(node.reportedSize || 0) > node.entries.length
+          ? 'Outside the available cache preview'
+          : 'Key absent'
+        : currentValue;
+      document.getElementById('howWalLog').textContent = state.liveMode
+        ? `Live log · ${node.walRecordCount} records`
+        : `Simulated · ${node.walRecords.length} records`;
+      const walRecords = node.walRecords.slice(-4).reverse();
+      document.getElementById('howWalList').innerHTML = walRecords.length
+        ? walRecords.map((record) => `<li><span>#${record.seq} · ${escapeHtml(record.op)}</span><strong>${escapeHtml(record.key)}</strong></li>`).join('')
+        : '<li>Mutations appear here after a PUT or DELETE.</li>';
+      const recoveryButton = document.getElementById('simulateRecoveryBtn');
+      recoveryButton.disabled = state.liveMode || learning.crashedNodeId === null;
+      recoveryButton.title = state.liveMode ? 'Recovery simulation is demo-only' : 'Replay the selected simulated node log into cache memory';
+      document.getElementById('simulateCrashBtn').disabled = state.liveMode || learning.crashedNodeId !== null;
+    } else {
+      document.getElementById('howRouteSummary').textContent = 'Enter a key in the playground to see its destination node.';
+      document.getElementById('howHashValues').textContent = 'No key selected.';
+      document.getElementById('howLruList').innerHTML = '<li>Cache entries appear after a PUT.</li>';
+      document.getElementById('howWalMemory').textContent = 'No key selected';
+      document.getElementById('howWalLog').textContent = 'No node selected';
+      document.getElementById('howWalList').innerHTML = '<li>Mutations appear here after a PUT or DELETE.</li>';
+    }
+    renderTour();
+    renderLearningAnimation();
+  }
+
+  function renderProductPerformance() {
+    const report = state.productReport;
+    const results = document.getElementById('productBenchmarkResults');
+    if (!results) return;
+    const notice = document.getElementById('productBenchmarkNotice');
+    const error = document.getElementById('productBenchmarkError');
+    if (!report) {
+      results.hidden = true;
+      document.getElementById('performanceModePill').textContent = 'NO RUN YET';
+      return;
+    }
+    results.hidden = false;
+    error.hidden = true;
+    const metrics = report.metrics;
+    const simulated = report.source === 'illustrative_simulation';
+    const measured = report.source === 'measured_python_load_tester';
+    const provenance = report.provenanceLabel || (simulated ? 'SIMULATED SAMPLE' : measured ? 'MEASURED' : 'IMPORTED');
+    document.getElementById('performanceModePill').textContent = provenance;
+    document.getElementById('productBenchmarkSource').textContent = provenance;
+    document.getElementById('productBenchmarkTitle').textContent =
+      `${report.target_mode === 'coordinator' ? 'Coordinator' : 'Data node'} · ${report.endpoint}`;
+    document.getElementById('productThroughput').textContent = `${Number(metrics.throughput_ops_sec).toLocaleString()} ops/s`;
+    document.getElementById('productP50').textContent = `${Number(metrics.p50_latency_ms).toLocaleString()} ms`;
+    document.getElementById('productP99').textContent = `${Number(metrics.p99_latency_ms).toLocaleString()} ms`;
+    document.getElementById('productFailures').textContent = metrics.failed_ops == null ? 'Not measured' : Number(metrics.failed_ops).toLocaleString();
+    document.getElementById('productFailureNote').textContent = metrics.successful_ops == null
+      ? `${Number(metrics.total_requests).toLocaleString()} requests · simulated`
+      : `${Number(metrics.successful_ops).toLocaleString()} completed`;
+    if (simulated) {
+      notice.textContent = 'Simulated sample data — these values are illustrative and are not measurements of a running cluster.';
+    } else if (report.timestamp && provenance.includes('SAVED')) {
+      notice.textContent = `Historical measurement from ${new Date(report.timestamp).toLocaleString()} · ${report.config.workers} workers · ${Number(metrics.total_requests).toLocaleString()} requests. Not a live reading.`;
+    } else {
+      notice.textContent = `${provenance} · ${report.config.workers} workers · ${Number(metrics.total_requests).toLocaleString()} requests · workload GET ${report.config.get_pct}% / PUT ${report.config.put_pct}% / DELETE ${report.config.delete_pct}%.`;
+    }
+    const chart = document.getElementById('productBenchmarkChart');
+    const series = report.series;
+    if (!series || series.length === 0) {
+      chart.innerHTML = '';
+      return;
+    }
+    const width = 640;
+    const height = 220;
+    const pad = { top: 12, right: 16, bottom: 30, left: 48 };
+    const plotWidth = width - pad.left - pad.right;
+    const plotHeight = height - pad.top - pad.bottom;
+    const max = Math.max(1, ...series.map((point) => Number(point.ops_per_sec))) * 1.12;
+    const points = series.map((point, index) => {
+      const x = pad.left + index / Math.max(1, series.length - 1) * plotWidth;
+      const y = pad.top + plotHeight - Number(point.ops_per_sec) / max * plotHeight;
+      return { x, y, bucket: point.bucket, value: Number(point.ops_per_sec) };
+    });
+    const grid = [0, 1, 2, 3].map((line) => {
+      const y = pad.top + plotHeight * line / 3;
+      const value = Math.round(max * (1 - line / 3));
+      return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="var(--dc-border)" stroke-dasharray="3 4"/><text x="${pad.left - 8}" y="${y + 3}" fill="var(--dc-muted)" font-size="9" text-anchor="end">${value.toLocaleString()}</text>`;
+    }).join('');
+    const path = points.map((point) => `${point.x},${point.y}`).join(' ');
+    chart.setAttribute('aria-label', `${provenance} throughput chart in operations per second.`);
+    chart.innerHTML = `${grid}<line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotHeight}" stroke="var(--dc-border-strong)"/><line x1="${pad.left}" y1="${pad.top + plotHeight}" x2="${width - pad.right}" y2="${pad.top + plotHeight}" stroke="var(--dc-border-strong)"/><polyline points="${path}" fill="none" stroke="var(--dc-purple)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>${points.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="3" fill="var(--dc-purple)"><title>Interval ${point.bucket}: ${point.value.toLocaleString()} ops/s</title></circle><text x="${point.x}" y="${height - 9}" fill="var(--dc-muted)" font-size="8" text-anchor="middle">${point.bucket}</text>`).join('')}`;
+  }
+
+  function initializeProductExperience() {
+    const demoKey = document.getElementById('demoKey');
+    const demoValue = document.getElementById('demoValue');
+    demoKey.value = state.arch.key;
+    demoValue.value = state.arch.val;
+    document.getElementById('archKeyInput').value = state.arch.key;
+    document.getElementById('archValInput').value = state.arch.val;
+
+    const guide = document.getElementById('firstRunGuide');
+    try {
+      guide.hidden = localStorage.getItem('discache-guide-dismissed') === 'true';
+    } catch (_) {
+      guide.hidden = false;
+    }
+    document.getElementById('dismissGuideBtn').addEventListener('click', () => {
+      guide.hidden = true;
+      try {
+        localStorage.setItem('discache-guide-dismissed', 'true');
+      } catch (_) {}
+    });
+    document.getElementById('startTourBtn').addEventListener('click', startInteractiveTour);
+    document.getElementById('printGuideBtn').addEventListener('click', () => window.print());
+    document.getElementById('tourRunStepBtn').addEventListener('click', () => {
+      if (!tour.active || tour.completed > tour.step || state.arch.activePlan?.pending) return;
+      state.arch.op = tourSteps[tour.step].op;
+      resetArchFlow();
+      state.arch.productLastResult = null;
+      renderProductExperience();
+      document.getElementById('demoRunBtn').click();
+    });
+    document.getElementById('tourPreviousBtn').addEventListener('click', () => {
+      if (!tour.active || tour.step === 0) return;
+      tour.step--;
+      renderProductExperience();
+    });
+    document.getElementById('tourNextBtn').addEventListener('click', () => {
+      if (!tour.active || tour.completed <= tour.step) return;
+      tour.step = Math.min(tour.completed, tourSteps.length - 1);
+      renderProductExperience();
+    });
+    document.getElementById('tourSkipBtn').addEventListener('click', () => finishInteractiveTour(true));
+    document.getElementById('tourFinishBtn').addEventListener('click', () => {
+      if (tour.completed === tourSteps.length) finishInteractiveTour(false);
+    });
+
+    document.querySelectorAll('[data-learning-mode]').forEach((button) => {
+      button.addEventListener('click', () => {
+        pauseLearningAnimation();
+        learning.mode = button.dataset.learningMode;
+        learning.step = -1;
+        document.querySelectorAll('[data-learning-mode]').forEach((tab) => {
+          tab.setAttribute('aria-pressed', String(tab === button));
+        });
+        renderLearningAnimation();
+      });
+    });
+    document.getElementById('learningRunBtn').addEventListener('click', () => {
+      pauseLearningAnimation();
+      const maxStep = learning.mode === 'route' ? 4 : 3;
+      if (state.reducedMotion) {
+        learning.step = maxStep;
+        renderLearningAnimation();
+        return;
+      }
+      if (learning.step >= maxStep) learning.step = -1;
+      advanceLearningAnimation();
+      if (learning.step < maxStep) {
+        learning.timer = window.setInterval(advanceLearningAnimation, 850);
+        renderLearningAnimation();
+      }
+    });
+    document.getElementById('learningStepBtn').addEventListener('click', () => {
+      pauseLearningAnimation();
+      advanceLearningAnimation();
+    });
+    document.getElementById('learningPauseBtn').addEventListener('click', pauseLearningAnimation);
+    document.getElementById('learningResetBtn').addEventListener('click', () => {
+      pauseLearningAnimation();
+      learning.step = -1;
+      renderLearningAnimation();
+    });
+
+    document.querySelectorAll('[data-demo-op]').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (state.arch.activePlan?.pending) return;
+        state.arch.op = button.dataset.demoOp;
+        document.querySelectorAll('[data-demo-op]').forEach((item) => {
+          const active = item === button;
+          item.classList.toggle('active', active);
+          item.setAttribute('aria-pressed', String(active));
+        });
+        resetArchFlow();
+        state.arch.productLastResult = null;
+        renderProductExperience();
+      });
+    });
+
+    const syncInputs = () => {
+      state.arch.key = demoKey.value;
+      state.arch.val = demoValue.value;
+      document.getElementById('archKeyInput').value = demoKey.value;
+      document.getElementById('archValInput').value = demoValue.value;
+      if (!state.arch.activePlan?.pending) {
+        resetArchFlow();
+        state.arch.productLastResult = null;
+      }
+      renderProductExperience();
+    };
+    demoKey.addEventListener('input', syncInputs);
+    demoValue.addEventListener('input', syncInputs);
+
+    document.getElementById('demoRunBtn').addEventListener('click', () => {
+      if (!demoKey.value.trim()) {
+        document.getElementById('demoResultTitle').textContent = 'Key required';
+        document.getElementById('demoResultMessage').textContent = 'Enter a key before running this request.';
+        document.getElementById('demoResultIndicator').textContent = 'INVALID INPUT';
+        document.getElementById('demoResultIndicator').dataset.state = 'error';
+        demoKey.focus();
+        return;
+      }
+      toggleArchRun();
+      renderProductExperience();
+    });
+    document.getElementById('demoStepBtn').addEventListener('click', () => {
+      if (!demoKey.value.trim()) {
+        document.getElementById('demoResultTitle').textContent = 'Key required';
+        document.getElementById('demoResultMessage').textContent = 'Enter a key before stepping through this request.';
+        document.getElementById('demoResultIndicator').textContent = 'INVALID INPUT';
+        document.getElementById('demoResultIndicator').dataset.state = 'error';
+        demoKey.focus();
+        return;
+      }
+      stopArchAutoRun();
+      stepArchForward();
+      renderProductExperience();
+    });
+    document.getElementById('demoResetBtn').addEventListener('click', () => {
+      stopArchAutoRun();
+      state.arch.op = 'PUT';
+      demoKey.value = 'session:4092';
+      demoValue.value = 'user=8810';
+      state.arch.key = demoKey.value;
+      state.arch.val = demoValue.value;
+      document.getElementById('archKeyInput').value = demoKey.value;
+      document.getElementById('archValInput').value = demoValue.value;
+      document.querySelectorAll('[data-demo-op]').forEach((button) => {
+        const active = button.dataset.demoOp === 'PUT';
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      state.arch.logs = [];
+      state.arch.stepSeq = 1;
+      state.arch.productHistory = [];
+      state.arch.productSequenceIndex = 0;
+      state.arch.productLastResult = null;
+      if (tour.active) {
+        tour.step = 0;
+        tour.completed = 0;
+        tour.results = [];
+        tour.attempt = null;
+      }
+      learning.crashedNodeId = null;
+      learning.recoveryMessage = 'No simulated crash.';
+      renderArchEventLog();
+      resetArchFlow();
+      if (!state.liveMode) restoreDemoCluster();
+      renderProductExperience();
+    });
+
+    document.getElementById('simulateCrashBtn').addEventListener('click', () => {
+      if (state.liveMode) return;
+      const key = demoKey.value.trim();
+      if (!key) return;
+      const nodeId = hashRing.route(key).physical.nodeId;
+      const node = state.nodes[nodeId];
+      const recordCount = node.walRecords.length;
+      node.clearMemoryOnly();
+      learning.crashedNodeId = nodeId;
+      learning.recoveryMessage = `Simulated cache-memory loss on Data Node ${nodeId}; ${recordCount} local log records remain.`;
+      renderProductExperience();
+    });
+    document.getElementById('simulateRecoveryBtn').addEventListener('click', () => {
+      if (state.liveMode || learning.crashedNodeId === null) return;
+      const node = state.nodes[learning.crashedNodeId];
+      const recordCount = node.walRecords.length;
+      node.replayWalUpTo(recordCount);
+      learning.recoveryMessage = `Replayed ${recordCount} local log record${recordCount === 1 ? '' : 's'} into Data Node ${node.nodeId}'s simulated cache.`;
+      learning.crashedNodeId = null;
+      renderProductExperience();
+    });
+
+    const syncBenchmarkControls = () => {
+      const target = document.getElementById('productBenchmarkTarget').value;
+      state.perfViewMode = target === 'coordinator' ? 'coordinator' : 'single_node';
+      document.getElementById('perfSingleNodeSelect').value = target === 'coordinator' ? 'node_1' : target;
+      document.getElementById('perfGetPct').value = document.getElementById('productGetPct').value;
+      document.getElementById('perfPutPct').value = document.getElementById('productPutPct').value;
+      document.getElementById('perfDelPct').value = document.getElementById('productDelPct').value;
+      document.getElementById('perfWorkersInput').value = document.getElementById('productWorkers').value;
+      document.getElementById('perfTotalReqsInput').value = document.getElementById('productRequests').value;
+    };
+    document.getElementById('productRunLiveBtn').addEventListener('click', () => {
+      if (!state.clusterAvailable || state.benchmarkRunning) return;
+      syncBenchmarkControls();
+      const params = readAndValidatePerfControls();
+      if (!params) {
+        const validation = document.getElementById('perfValidationMsg');
+        document.getElementById('productBenchmarkError').textContent = validation.textContent;
+        document.getElementById('productBenchmarkError').hidden = false;
+        return;
+      }
+      document.getElementById('productBenchmarkError').hidden = true;
+      document.getElementById('runLiveBenchBtn').click();
+    });
+    document.getElementById('productSampleBtn').addEventListener('click', () => {
+      syncBenchmarkControls();
+      const params = readAndValidatePerfControls();
+      if (!params) {
+        const banner = document.getElementById('productBenchmarkError');
+        banner.textContent = document.getElementById('perfValidationMsg').textContent;
+        banner.hidden = false;
+        return;
+      }
+      document.getElementById('productBenchmarkError').hidden = true;
+      document.getElementById('loadIllustrativeBtn').click();
+    });
+    document.getElementById('productLoadSavedBtn').addEventListener('click', async () => {
+      const button = document.getElementById('productLoadSavedBtn');
+      button.disabled = true;
+      document.getElementById('productBenchmarkError').hidden = true;
+      try {
+        const response = await fetch('/api/benchmark_results.json', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Saved benchmark is unavailable (HTTP ${response.status}).`);
+        const report = await response.json();
+        validateBenchmarkReport(report);
+        const savedAt = report.timestamp ? new Date(report.timestamp).toLocaleDateString() : 'date unavailable';
+        applyBenchmarkReport(report, `SAVED MEASUREMENT · ${savedAt}`);
+      } catch (error) {
+        const banner = document.getElementById('productBenchmarkError');
+        banner.textContent = error.message;
+        banner.hidden = false;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById('productImportReport').addEventListener('change', (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const report = JSON.parse(String(reader.result));
+          applyBenchmarkReport(report, 'IMPORTED BENCHMARK · JSON');
+          document.getElementById('productBenchmarkError').hidden = true;
+        } catch (error) {
+          const banner = document.getElementById('productBenchmarkError');
+          banner.textContent = `Could not load benchmark report: ${error.message}`;
+          banner.hidden = false;
+        }
+      };
+      reader.onerror = () => {
+        const banner = document.getElementById('productBenchmarkError');
+        banner.textContent = 'Could not read the selected benchmark file.';
+        banner.hidden = false;
+      };
+      reader.readAsText(file);
+    });
+
+    renderProductExperience();
+    renderProductPerformance();
+  }
+
   // ==========================================================================
   // 11. EVENT LISTENERS & INITIALIZATION
   // ==========================================================================
   function bindEvents() {
-    // Topbar Navigation Active State
-    const navLinks = document.querySelectorAll('.main-nav .nav-link');
-    navLinks.forEach((link) => {
-      link.addEventListener('click', () => {
-        navLinks.forEach((l) => l.classList.remove('active'));
-        link.classList.add('active');
+    document.querySelectorAll('[data-route-link]').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        const target = new URL(link.href, location.href);
+        if (target.origin !== location.origin) return;
+        event.preventDefault();
+        navigateToRoute(target.pathname);
       });
+    });
+    window.addEventListener('popstate', () => navigateToRoute(location.pathname, { push: false }));
+
+    document.getElementById('themeSelect').addEventListener('change', (event) => {
+      applyTheme(event.target.value, true);
     });
 
     // Mode Toggle (Demo Mode vs Live C++ Cluster Mode)
     document.getElementById('modeToggleBtn').addEventListener('click', () => {
-      if (!state.bridgeConnected) {
-        updateModeIndicator(false);
+      if (!state.bridgeConnected || (!state.liveMode && !state.clusterAvailable)) {
+        updateModeIndicator();
         return;
       }
+      const wasLive = state.liveMode;
       state.liveMode = !state.liveMode;
-      updateModeIndicator(true);
+      learning.crashedNodeId = null;
+      learning.recoveryMessage = state.liveMode ? 'Recovery controls are disabled for live data.' : 'No simulated crash.';
+      if (wasLive && !state.liveMode) restoreDemoCluster();
+      updateModeIndicator();
       if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
         state.ws.send(JSON.stringify({ type: 'inspect_cluster' }));
+        if (state.latestClusterSnapshot) {
+          syncSnapshotFromLiveCluster(state.latestClusterSnapshot);
+        }
       }
+      renderProductExperience();
     });
 
     // Motion Toggle (Standard vs Reduced Motion)
     document.getElementById('motionToggleBtn').addEventListener('click', () => {
       state.reducedMotion = !state.reducedMotion;
+      document.documentElement.dataset.reducedMotion = String(state.reducedMotion);
+      const motionButton = document.getElementById('motionToggleBtn');
+      motionButton.setAttribute('aria-pressed', String(state.reducedMotion));
       document.getElementById('motionBtnText').textContent = state.reducedMotion
         ? 'MOTION: REDUCED'
         : 'MOTION: STANDARD';
+      if (state.reducedMotion) {
+        refreshScrollReveals();
+        pauseLearningAnimation();
+      }
+      renderLearningAnimation();
+      if (state.reducedMotion) pauseLearningAnimation();
     });
 
     // Architecture Controls
     const archOpBtns = document.querySelectorAll('#archOpGroup .seg-btn');
+    document.getElementById('archValInput').disabled = state.arch.op !== 'PUT';
     archOpBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
         archOpBtns.forEach((b) => b.classList.remove('active'));
@@ -1942,8 +3546,8 @@
     document.getElementById('ringExecuteInArchBtn').addEventListener('click', () => {
       const k = document.getElementById('ringKeyInput').value.trim() || 'session:4092';
       document.getElementById('archKeyInput').value = k;
+      navigateToRoute('/playground');
       resetArchFlow();
-      document.getElementById('architecture').scrollIntoView({ behavior: 'smooth' });
       stepArchForward();
     });
     document.getElementById('runKeySampleDistBtn').addEventListener('click', () => {
@@ -1984,18 +3588,25 @@
     document.getElementById('applyCacheCapBtn').addEventListener('click', () => {
       const newCap = Math.max(2, Number(document.getElementById('cacheDemoCapInput').value) || 5);
       const node = state.nodes[state.cacheSelectedNode];
+      if (state.liveMode) {
+        const button = document.getElementById('applyCacheCapBtn');
+        button.disabled = true;
+        sendLiveOperation({
+          type: 'node_config',
+          nodeId: node.nodeId,
+          configKey: 'CAPACITY',
+          configValue: String(newCap),
+        }, (result, error) => {
+          button.disabled = false;
+          state.lastCacheBanner = error
+            ? `LIVE capacity update failed: ${error}`
+            : `LIVE capacity update → ${result?.payload || 'no response'}`;
+          renderCacheEngineView();
+        });
+        return;
+      }
       node.setCapacity(newCap);
       state.lastCacheBanner = `Updated Node ${node.nodeId} Demo Capacity to ${node.capacity} entries (System Default: 100,000)`;
-      if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(
-          JSON.stringify({
-            type: 'node_config',
-            nodeId: node.nodeId,
-            configKey: 'CAPACITY',
-            configValue: String(newCap),
-          })
-        );
-      }
       renderCacheEngineView();
       renderClusterNodeCards();
     });
@@ -2015,18 +3626,25 @@
 
     document.getElementById('cacheClearNodeBtn').addEventListener('click', () => {
       const node = state.nodes[state.cacheSelectedNode];
+      if (state.liveMode) {
+        const button = document.getElementById('cacheClearNodeBtn');
+        button.disabled = true;
+        sendLiveOperation({
+          type: 'node_config',
+          nodeId: node.nodeId,
+          configKey: 'RESET',
+          configValue: '',
+        }, (result, error) => {
+          button.disabled = false;
+          state.lastCacheBanner = error
+            ? `LIVE reset failed: ${error}`
+            : `LIVE reset → ${result?.payload || 'no response'}`;
+          renderCacheEngineView();
+        });
+        return;
+      }
       node.clearAll();
       state.lastCacheBanner = `Cleared Node ${node.nodeId} in-memory cache and WAL.`;
-      if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(
-          JSON.stringify({
-            type: 'node_config',
-            nodeId: node.nodeId,
-            configKey: 'RESET',
-            configValue: '',
-          })
-        );
-      }
       renderCacheEngineView();
       renderClusterNodeCards();
       renderWalRecoveryView();
@@ -2064,21 +3682,35 @@
       if (!key) return;
 
       animateMutationWorkflow();
+      if (state.liveMode) {
+        const button = document.getElementById('walAppendBtn');
+        button.disabled = true;
+        sendLiveOperation({
+          type: 'execute_op',
+          directNodeId: node.nodeId,
+          op,
+          key,
+          value: val,
+        }, (result, error) => {
+          button.disabled = false;
+          if (error) {
+            setRouteOutcome(`Live WAL mutation failed: ${error}`);
+          } else {
+            state.recoveryStep = 1;
+            state.recoveryReplayedCount = node.walRecords.length;
+            state.lastCacheBanner = `LIVE ${op} → ${result?.payload || 'no response'} · WAL sequence #${node.walRecordCount}`;
+            setRouteOutcome(`${op} ${key} → ${result?.payload || 'no response'} · Data Node ${node.nodeId} · WAL sequence #${node.walRecordCount}.`);
+          }
+          renderWalRecoveryView();
+          renderCacheEngineView();
+          renderClusterNodeCards();
+        });
+        return;
+      }
       if (op === 'PUT') {
         node.put(key, val, false);
       } else {
         node.del(key, false);
-      }
-      if (state.liveMode && state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(
-          JSON.stringify({
-            type: 'execute_op',
-            directNodeId: node.nodeId,
-            op,
-            key,
-            value: val,
-          })
-        );
       }
       state.recoveryStep = 1;
       state.recoveryReplayedCount = node.walRecords.length;
@@ -2129,11 +3761,15 @@
 
       if (state.bridgeConnected && state.ws && state.ws.readyState === WebSocket.OPEN) {
         const btn = document.getElementById('runLiveBenchBtn');
+        state.benchmarkRunning = true;
+        updateModeIndicator();
+        state.benchmarkRequestId = `ui-${++state.operationSeq}`;
         btn.disabled = true;
-        btn.textContent = 'Running 50+ Workers...';
-        state.ws.send(
-          JSON.stringify({
+        btn.textContent = `Running ${params.workers} workers...`;
+        try {
+          state.ws.send(JSON.stringify({
             type: 'run_benchmark',
+            requestId: state.benchmarkRequestId,
             params: {
               targetMode: params.targetMode,
               totalRequests: params.totalReqs,
@@ -2142,18 +3778,16 @@
               putPct: params.putPct,
               deletePct: params.delPct,
             },
-          })
-        );
+          }));
+        } catch (error) {
+          state.benchmarkRunning = false;
+          state.benchmarkRequestId = null;
+          btn.disabled = !state.clusterAvailable;
+          btn.textContent = 'Run Benchmark';
+          showPerformanceError(`LIVE BENCHMARK FAILED: ${error.message}. Use Generate Illustrative Sample for simulated data.`);
+        }
       } else {
-        const simReport = generateDeterministicIllustrativeReport(
-          params.targetMode,
-          params.workers,
-          params.totalReqs,
-          params.getPct,
-          params.putPct,
-          params.delPct
-        );
-        applyBenchmarkReport(simReport, 'ILLUSTRATIVE DATA (SIMULATED)');
+        showPerformanceError('LIVE BENCHMARK UNAVAILABLE: the bridge and all C++ nodes must be connected. Use Generate Illustrative Sample for simulated data.');
       }
     });
 
@@ -2191,32 +3825,24 @@
   }
 
   function init() {
+    arrangeArchitectureContent();
+    initializeTheme();
+    state.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.documentElement.dataset.reducedMotion = String(state.reducedMotion);
+    document.getElementById('motionToggleBtn').setAttribute('aria-pressed', String(state.reducedMotion));
+    document.getElementById('motionBtnText').textContent = state.reducedMotion
+      ? 'MOTION: REDUCED'
+      : 'MOTION: STANDARD';
     seedInitialClusterState();
 
-    // Generate initial illustrative benchmark reports for both Coordinator & Single Data Node views
-    state.perfReports.coordinator = generateDeterministicIllustrativeReport(
-      'coordinator',
-      50,
-      2500,
-      70,
-      20,
-      10
-    );
-    state.perfReports.single_node = generateDeterministicIllustrativeReport(
-      'node_1',
-      50,
-      2500,
-      70,
-      20,
-      10
-    );
-
     bindEvents();
+    initializeProductExperience();
     applyArchStageVisuals(0);
     renderHashRingVisualizer();
     renderCacheEngineView();
     renderWalRecoveryView();
     renderPerformanceLab();
+    navigateToRoute(location.pathname, { push: false, scroll: false });
     initWebSocketBridge();
   }
 

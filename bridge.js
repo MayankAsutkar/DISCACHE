@@ -11,7 +11,7 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 
 const HTTP_PORT = Number(process.env.BRIDGE_PORT || 8080);
@@ -35,6 +35,17 @@ const OP = {
 };
 
 const publicDir = path.join(__dirname, 'public');
+const appRoutes = new Set([
+  '/',
+  '/playground',
+  '/how-it-works',
+  '/hash-ring',
+  '/cache',
+  '/recovery',
+  '/performance',
+  '/guide',
+  '/architecture',
+]);
 
 function encodeBinaryRequest(opcode, key = '', value = '') {
   const keyBuf = Buffer.from(String(key), 'utf8');
@@ -210,6 +221,19 @@ function parseRingInspectPayload(raw) {
   return ring;
 }
 
+function resolvePythonExecutable() {
+  if (process.env.DISCACHE_PYTHON) return process.env.DISCACHE_PYTHON;
+  if (process.platform === 'win32') {
+    const result = spawnSync('where.exe', ['python'], { encoding: 'utf8', windowsHide: true });
+    const candidates = String(result.stdout || '').split(/\r?\n/).map((value) => value.trim());
+    const executable = candidates.find((candidate) =>
+      candidate && !/\\WindowsApps\\/i.test(candidate) && fs.existsSync(candidate)
+    );
+    if (executable) return executable;
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
 async function fetchClusterSnapshot() {
   const status = {
     coordinatorOnline: false,
@@ -272,7 +296,7 @@ function runPythonLoadTester(params) {
       '--json',
     ];
 
-    const proc = spawn('python', args, { cwd: __dirname });
+    const proc = spawn(resolvePythonExecutable(), args, { cwd: __dirname, windowsHide: true });
     let stdout = '';
     let stderr = '';
 
@@ -304,18 +328,45 @@ async function ensureLocalClusterRunning() {
     return;
   }
 
+  const onlineNodeCount = Object.values(snap.nodesOnline).filter(Boolean).length;
+  if (snap.coordinatorOnline || onlineNodeCount > 0) {
+    console.warn('[Bridge] A partial DisCache cluster is already running; refusing to start duplicate processes.');
+    return;
+  }
+
   const coordBin = path.join(__dirname, 'discache_coordinator');
   const nodeBin = path.join(__dirname, 'discache_node');
   if (fs.existsSync(coordBin) && fs.existsSync(nodeBin) && process.platform === 'win32') {
+    const wslProbe = spawnSync('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', '-lc', 'true'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    });
+    if (wslProbe.error || wslProbe.status !== 0) {
+      console.error('[Bridge] Cannot auto-start the C++ cluster: the WSL distribution "Ubuntu" is unavailable. Install/configure Ubuntu in WSL or start the four C++ services manually.');
+      return;
+    }
+
     const wslDir = __dirname.replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`).replace(/\\/g, '/');
     console.log('[Bridge] Starting 4 C++20 DisCache processes in WSL (:8000, :8001, :8002, :8003)...');
-    const cmd = `cd "${wslDir}" && (killall -q discache_node discache_coordinator || true) && ./discache_node 1 8001 node_1.log >/dev/null 2>&1 & ./discache_node 2 8002 node_2.log >/dev/null 2>&1 & ./discache_node 3 8003 node_3.log >/dev/null 2>&1 & sleep 0.4 && ./discache_coordinator 8000 >/dev/null 2>&1 & wait`;
+    const cmd = `cd "${wslDir}" && ./discache_node 1 8001 node_1.log >/dev/null 2>&1 & ./discache_node 2 8002 node_2.log >/dev/null 2>&1 & ./discache_node 3 8003 node_3.log >/dev/null 2>&1 & sleep 0.4 && ./discache_coordinator 8000 >/dev/null 2>&1 & wait`;
     const child = spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', '-lc', cmd], {
       stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.once('error', (error) => {
+      console.error(`[Bridge] Failed to launch the WSL cluster: ${error.message}`);
+    });
+    child.once('exit', (code, signal) => {
+      if (code !== 0) {
+        console.error(`[Bridge] WSL cluster launcher exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`);
+      }
     });
     process.on('exit', () => {
       try { child.kill(); } catch (_) {}
     });
+  } else if (process.platform === 'win32') {
+    console.warn('[Bridge] C++ cluster binaries are missing; live mode is unavailable until the services are built and started.');
   }
 }
 
@@ -333,7 +384,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ error: 'No exported benchmark_results.json found yet.' }));
   }
 
-  const requested = pathname === '/' ? '/index.html' : pathname;
+  const requested = appRoutes.has(pathname) ? '/index.html' : pathname;
   const file = path.normalize(path.join(publicDir, requested));
   if (!file.startsWith(publicDir)) {
     res.writeHead(403);
@@ -375,8 +426,10 @@ wss.on('connection', async (ws) => {
   }
 
   ws.on('message', async (rawMessage) => {
+    let requestId = null;
     try {
       const msg = JSON.parse(rawMessage.toString());
+      requestId = msg.requestId || null;
 
       if (msg.type === 'inspect_cluster') {
         const snapshot = await fetchClusterSnapshot();
@@ -408,11 +461,11 @@ wss.on('connection', async (ws) => {
         if (stage === 'CLEAR_MEMORY') {
           const res = await sendBinaryRequest(COORD_HOST, port, OP.RECOVER, 'CLEAR_MEMORY', '');
           const snapshot = await fetchClusterSnapshot();
-          send({ type: 'recover_result', nodeId, stage, result: res, snapshot });
+          send({ type: 'recover_result', requestId, nodeId, stage, result: res, snapshot });
         } else {
           const res = await sendBinaryRequest(COORD_HOST, port, OP.RECOVER, 'REPLAY_WAL', '');
           const snapshot = await fetchClusterSnapshot();
-          send({ type: 'recover_result', nodeId, stage: 'REPLAY_WAL', result: res, snapshot });
+          send({ type: 'recover_result', requestId, nodeId, stage: 'REPLAY_WAL', result: res, snapshot });
         }
       } else if (msg.type === 'node_config') {
         const nodeId = Number(msg.nodeId || 1);
@@ -422,7 +475,7 @@ wss.on('connection', async (ws) => {
 
         const res = await sendBinaryRequest(COORD_HOST, port, OP.CONFIG, configKey, configVal);
         const snapshot = await fetchClusterSnapshot();
-        send({ type: 'config_result', nodeId, configKey, configVal, result: res, snapshot });
+        send({ type: 'config_result', requestId, nodeId, configKey, configVal, result: res, snapshot });
       } else if (msg.type === 'reset_cluster') {
         for (const nid of [1, 2, 3]) {
           try {
@@ -432,18 +485,20 @@ wss.on('connection', async (ws) => {
         const snapshot = await fetchClusterSnapshot();
         send({ type: 'cluster_snapshot', snapshot });
       } else if (msg.type === 'run_benchmark') {
-        send({ type: 'benchmark_started', params: msg.params });
+        send({ type: 'benchmark_started', requestId, params: msg.params });
         const report = await runPythonLoadTester(msg.params || {});
         const snapshot = await fetchClusterSnapshot();
-        send({ type: 'benchmark_result', report, snapshot });
+        send({ type: 'benchmark_result', requestId, report, snapshot });
       }
     } catch (error) {
-      send({ type: 'error', message: error.message });
+      send({ type: 'error', requestId, message: error.message });
     }
   });
 });
 
 server.listen(HTTP_PORT, () => {
   console.log(`DisCache Lab Bridge listening at http://localhost:${HTTP_PORT}`);
-  ensureLocalClusterRunning();
+  ensureLocalClusterRunning().catch((error) => {
+    console.error(`[Bridge] Cluster startup check failed: ${error.message}`);
+  });
 });

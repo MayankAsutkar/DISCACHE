@@ -5,3 +5,8 @@ dump.my_rdb
 build
 node_modules
 my_redis_server.exe
+__pycache__/
+*.py[cod]
+/discache_coordinator
+/discache_node
+/node_*.log

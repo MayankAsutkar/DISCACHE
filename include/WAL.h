@@ -26,8 +26,8 @@ public:
     WAL(const WAL&) = delete;
     WAL& operator=(const WAL&) = delete;
 
-    // Appends a PUT or DELETE record and flushes durable record to disk
-    // BEFORE updating in-memory cache.
+    // Appends a PUT or DELETE record and flushes the C++ output stream
+    // BEFORE updating memory. This does not call fsync/fdatasync.
     bool append_put(const std::string& key, const std::string& value);
     bool append_delete(const std::string& key);
 

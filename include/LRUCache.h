@@ -44,7 +44,7 @@ public:
     LRUCache(const LRUCache&) = delete;
     LRUCache& operator=(const LRUCache&) = delete;
 
-    // O(1) Cache operations
+    // Average-case O(1) hash-map operations plus O(1) list pointer updates.
     std::optional<std::string> get(const std::string& key);
     PutOutcome put(const std::string& key, const std::string& value);
     bool del(const std::string& key);

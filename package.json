@@ -1,9 +1,9 @@
 {
-  "name": "discache-distributed-systems-lab",
+  "name": "discache",
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
-  "description": "DisCache — Interactive Distributed Systems Lab & Binary TCP Adapter",
+  "description": "DisCache — distributed in-memory cache and interactive browser demo",
   "scripts": {
     "start": "node bridge.js",
     "benchmark": "python load_tester.py --workers 50 --requests 2500",
